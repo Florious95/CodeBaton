@@ -69,6 +69,7 @@ dependencies = [
  "blake3",
  "ed25519-dalek",
  "keyring",
+ "libc",
  "mdns-sd",
  "rand_core 0.6.4",
  "serde",

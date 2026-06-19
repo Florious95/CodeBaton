@@ -12,7 +12,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::io::{BufRead, BufReader, Read};
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream, UdpSocket};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
@@ -21,7 +21,9 @@ use aisync_core::{
     AisyncError, DeviceId, DeviceInfo, Direction, Discoverer, OsType, Result, RewriteDirection,
     SyncManifest,
 };
-use aisync_discovery::{DiscoveryConfig, MdnsDiscoverer, PeerConnectionInfo};
+use aisync_discovery::{
+    local_device_addresses, DiscoveryConfig, MdnsDiscoverer, PeerConnectionInfo,
+};
 use aisync_session::{ClaudeCodeParser, PathRule, RuleBasedRewriter};
 use aisync_sync::{
     default_state_path, load_config, save_config, DiscoveredProject, FsWatcher, PeerConfig,
@@ -157,6 +159,9 @@ struct FileReceiveState {
     tmp_path: PathBuf,
     expected_size: u64,
     bytes_written: u64,
+    filename: String,
+    sender_name: String,
+    history_config_path: PathBuf,
 }
 
 impl Backend {
@@ -224,7 +229,7 @@ impl Backend {
 
         let mut disco_cfg = DiscoveryConfig::new(config.device.name.clone(), config.receive_port);
         disco_cfg.local_device.id = config.device.id;
-        disco_cfg.local_device.addresses = local_ip_addresses();
+        disco_cfg.local_device.addresses = local_device_addresses();
         if let Some(serve) = &serve {
             disco_cfg.receiver_cert_der = fs::read(&serve.cert_path).ok();
         }
@@ -279,7 +284,7 @@ impl Backend {
         let file_receive_states = Arc::new(Mutex::new(HashMap::new()));
         let mut disco_cfg = DiscoveryConfig::new(config.device.name.clone(), config.receive_port);
         disco_cfg.local_device.id = config.device.id;
-        disco_cfg.local_device.addresses = local_ip_addresses();
+        disco_cfg.local_device.addresses = local_device_addresses();
         let discoverer = MdnsDiscoverer::new(disco_cfg)?;
         let project_watchers = start_project_watchers(&config_path, &config);
         let workspace_watchers = start_workspace_watchers(&config_path, &config);
@@ -346,7 +351,7 @@ impl Backend {
         }
         let mut disco_cfg = DiscoveryConfig::new(config.device.name.clone(), config.receive_port);
         disco_cfg.local_device.id = config.device.id;
-        disco_cfg.local_device.addresses = local_ip_addresses();
+        disco_cfg.local_device.addresses = local_device_addresses();
         if let Some(serve) = &serve {
             disco_cfg.receiver_cert_der = fs::read(&serve.cert_path).ok();
         }
@@ -395,15 +400,30 @@ impl Backend {
             let message = TextMessagePayload {
                 sender_name: g.config.device.name.clone(),
                 content,
-                timestamp: unix_secs_now(),
+                timestamp: epoch_millis_now_u64(),
             };
             (endpoint, tls, message)
         };
-        send_text_message(endpoint, tls, message)
+        send_text_message(endpoint, tls, message.clone())?;
+        let config_path = self.config_path();
+        record_text_message_history(&config_path, Some(peer_name), &message, true);
+        Ok(())
     }
 
     pub fn take_pending_text_message(&self) -> Option<TextMessagePayload> {
         self.pending_text_messages.lock().unwrap().pop_front()
+    }
+
+    pub fn text_messages(&self, peer_name: Option<&str>) -> Vec<serde_json::Value> {
+        let path = self.config_path().with_file_name("chat_history.jsonl");
+        read_jsonl(&path)
+            .into_iter()
+            .filter(|row| {
+                peer_name
+                    .map(|peer| row.get("peerName").and_then(|v| v.as_str()) == Some(peer))
+                    .unwrap_or(true)
+            })
+            .collect()
     }
 
     pub fn default_file_receive_dir(&self) -> PathBuf {
@@ -510,9 +530,35 @@ impl Backend {
         Some(request)
     }
 
-    pub fn suggested_file_receive_path(&self, filename: &str) -> PathBuf {
-        let g = self.inner.lock().unwrap();
-        default_file_receive_dir(&g.config_path, &g.config).join(safe_filename(filename))
+    pub fn pending_file_transfers(&self) -> Vec<FileTransferRequestPayload> {
+        let mut queued = Vec::new();
+        {
+            let mut queue = self.pending_file_transfer_requests.lock().unwrap();
+            while let Some(request) = queue.pop_front() {
+                queued.push(request);
+            }
+        }
+        let mut g = self.inner.lock().unwrap();
+        for request in queued {
+            g.file_transfer_requests
+                .insert(request.transfer_id.clone(), request);
+        }
+        let mut pending: Vec<_> = g.file_transfer_requests.values().cloned().collect();
+        pending.sort_by(|left, right| left.transfer_id.cmp(&right.transfer_id));
+        pending
+    }
+
+    pub fn accept_file_transfer(&self, transfer_id: &str, save_dir: PathBuf) -> Result<()> {
+        let filename = {
+            let g = self.inner.lock().unwrap();
+            g.file_transfer_requests
+                .get(transfer_id)
+                .map(|request| safe_filename(&request.filename))
+                .ok_or_else(|| {
+                    AisyncError::Config(format!("file transfer request '{transfer_id}' not found"))
+                })?
+        };
+        self.confirm_file_transfer_request(transfer_id, save_dir.join(filename))
     }
 
     pub fn confirm_file_transfer_request(
@@ -529,7 +575,10 @@ impl Backend {
                 .ok_or_else(|| {
                     AisyncError::Config(format!("file transfer request '{transfer_id}' not found"))
                 })?;
-            let receive_dir = default_file_receive_dir(&g.config_path, &g.config);
+            let receive_dir = target_path
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| default_file_receive_dir(&g.config_path, &g.config));
             let target_path = ensure_file_receive_target(&receive_dir, &target_path)?;
             let live_connection = g
                 .discoverer
@@ -551,7 +600,7 @@ impl Backend {
                 transfer_id: request.transfer_id.clone(),
                 accepted: true,
                 ready: true,
-                filename: request.filename,
+                filename: request.filename.clone(),
                 message: None,
                 device: with_endpoint_first(local_device, local_endpoint),
             };
@@ -562,6 +611,9 @@ impl Backend {
                 tmp_path,
                 expected_size: request.size,
                 bytes_written: 0,
+                filename: request.filename,
+                sender_name: request.sender_name,
+                history_config_path: g.config_path.clone(),
             };
             (ack_connection.endpoint, tls, ack, state)
         };
@@ -583,9 +635,38 @@ impl Backend {
             &[
                 ("transfer_id", transfer_id.to_string()),
                 ("filename", ack.filename),
+                ("target_path", self.file_receive_target_path(transfer_id)),
             ],
         );
         Ok(())
+    }
+
+    fn file_receive_target_path(&self, transfer_id: &str) -> String {
+        self.file_receive_states
+            .lock()
+            .unwrap()
+            .get(transfer_id)
+            .map(|state| state.target_path.display().to_string())
+            .unwrap_or_default()
+    }
+
+    pub fn file_transfer_history(&self, peer_name: Option<&str>) -> Vec<serde_json::Value> {
+        let path = self
+            .config_path()
+            .with_file_name("file_transfer_history.jsonl");
+        read_jsonl(&path)
+            .into_iter()
+            .filter(|row| {
+                peer_name
+                    .map(|peer| row.get("peer").and_then(|v| v.as_str()) == Some(peer))
+                    .unwrap_or(true)
+            })
+            .collect()
+    }
+
+    pub fn suggested_file_receive_path(&self, filename: &str) -> PathBuf {
+        let g = self.inner.lock().unwrap();
+        default_file_receive_dir(&g.config_path, &g.config).join(safe_filename(filename))
     }
 
     pub fn process_file_transfer_acks(&self) -> Result<usize> {
@@ -604,16 +685,36 @@ impl Backend {
                 }
                 continue;
             }
-            let (endpoint, tls, source_path) = {
+            let (endpoint, tls, source_path, peer_name, config_path) = {
                 let mut g = self.inner.lock().unwrap();
                 let Some(outbound) = g.outbound_file_transfers.remove(&ack.transfer_id) else {
                     continue;
                 };
                 let (endpoint, tls) = control_connection_for_peer(&g, &outbound.peer_name)?;
-                (endpoint, tls, outbound.path)
+                (
+                    endpoint,
+                    tls,
+                    outbound.path,
+                    outbound.peer_name,
+                    g.config_path.clone(),
+                )
             };
-            send_file_transfer_data(endpoint, tls, ack.transfer_id.clone(), source_path)?;
+            let size = fs::metadata(&source_path)
+                .map(|metadata| metadata.len())
+                .unwrap_or(0);
+            send_file_transfer_data(endpoint, tls, ack.transfer_id.clone(), source_path.clone())?;
             processed += 1;
+            record_file_transfer_history(
+                &config_path,
+                "out",
+                &peer_name,
+                &ack.filename,
+                &source_path,
+                size,
+                &ack.transfer_id,
+                "sent",
+                None,
+            );
             app_log(
                 "file_transfer_data_sent",
                 &[("transfer_id", ack.transfer_id), ("filename", ack.filename)],
@@ -729,7 +830,9 @@ impl Backend {
             .unwrap()
             .config_path
             .with_file_name("history.jsonl");
+        let event_id = aisync_discovery::new_pairing_request_id();
         let entry = serde_json::json!({
+            "eventId": event_id,
             "timestamp": timestamp,
             "projectId": project_id,
             "direction": direction,
@@ -743,9 +846,25 @@ impl Backend {
             "role": "sender",
             "fileType": "mixed",
         });
-        if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(&path) {
-            use std::io::Write;
-            let _ = writeln!(f, "{entry}");
+        match append_json_line(&path, &entry) {
+            Ok(()) => app_log(
+                "sender_sync_history_recorded",
+                &[
+                    ("project", project_id.to_string()),
+                    ("event_id", event_id.clone()),
+                    ("role", "sender".to_string()),
+                    ("path", path.display().to_string()),
+                ],
+            ),
+            Err(error) => app_log(
+                "history_write_failed",
+                &[
+                    ("project", project_id.to_string()),
+                    ("event_id", event_id),
+                    ("path", path.display().to_string()),
+                    ("error", error.to_string()),
+                ],
+            ),
         }
     }
 
@@ -2051,26 +2170,59 @@ impl Backend {
             };
             match run_workspace_auto_sync(&config_path, &candidate, &workspace, live_connection) {
                 Ok(report) => {
+                    let files =
+                        (report.code_files_transferred + report.session_files_transferred) as u32;
+                    record_auto_sync_history(
+                        &config_path,
+                        &workspace.name,
+                        true,
+                        files,
+                        None,
+                        Some(&workspace.name),
+                        None,
+                        "mixed",
+                    );
+                    record_auto_workspace_child_history(
+                        &config_path,
+                        &workspace,
+                        true,
+                        None,
+                        "mixed",
+                    );
                     app_log(
                         "workspace_initial_sync_complete",
                         &[
                             ("workspace", workspace.name.clone()),
                             ("peer", peer_name.clone()),
-                            (
-                                "file_count",
-                                (report.code_files_transferred + report.session_files_transferred)
-                                    .to_string(),
-                            ),
+                            ("file_count", files.to_string()),
                         ],
                     );
                 }
                 Err(error) => {
+                    let detail = error.to_string();
+                    record_auto_sync_history(
+                        &config_path,
+                        &workspace.name,
+                        false,
+                        0,
+                        Some(detail.clone()),
+                        Some(&workspace.name),
+                        None,
+                        "mixed",
+                    );
+                    record_auto_workspace_child_history(
+                        &config_path,
+                        &workspace,
+                        false,
+                        Some(&detail),
+                        "mixed",
+                    );
                     app_log(
                         "workspace_initial_sync_failed",
                         &[
                             ("workspace", workspace.name.clone()),
                             ("peer", peer_name.clone()),
-                            ("error", error.to_string()),
+                            ("error", detail),
                         ],
                     );
                     return Err(error);
@@ -2741,11 +2893,81 @@ fn file_transfer_ack_connection(
     })
 }
 
+fn prepare_default_file_transfer_accept(
+    config_path: &Path,
+    receive_port: u16,
+    request: &FileTransferRequestPayload,
+) -> Result<(
+    SocketAddr,
+    TlsConfig,
+    FileTransferAckPayload,
+    FileReceiveState,
+)> {
+    let config = load_config(config_path)?;
+    let receive_dir = default_file_receive_dir(config_path, &config);
+    let target_path = ensure_file_receive_target(
+        &receive_dir,
+        &receive_dir.join(safe_filename(&request.filename)),
+    )?;
+    let ack_connection = file_transfer_ack_connection(None, request)?;
+    let identity = generate_tls_identity("aisync-client")?;
+    let tls = TlsConfig::new(identity, ack_connection.server_name)
+        .with_pinned_peer_cert(ack_connection.receiver_cert_der);
+    let local_device = DeviceInfo {
+        id: config.device.id,
+        name: config.device.name,
+        os: local_os_type(),
+        addresses: local_device_addresses(),
+        protocol_version: 1,
+    };
+    let local_ip = if ack_connection.endpoint.ip().is_loopback() {
+        IpAddr::V4(Ipv4Addr::LOCALHOST)
+    } else {
+        local_device
+            .addresses
+            .first()
+            .copied()
+            .unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST))
+    };
+    let ack = FileTransferAckPayload {
+        transfer_id: request.transfer_id.clone(),
+        accepted: true,
+        ready: true,
+        filename: request.filename.clone(),
+        message: None,
+        device: with_endpoint_first(local_device, Some(SocketAddr::new(local_ip, receive_port))),
+    };
+    let tmp_path = file_transfer_tmp_path(&target_path, &request.transfer_id);
+    let _ = fs::remove_file(&tmp_path);
+    let state = FileReceiveState {
+        target_path,
+        tmp_path,
+        expected_size: request.size,
+        bytes_written: 0,
+        filename: request.filename.clone(),
+        sender_name: request.sender_name.clone(),
+        history_config_path: config_path.to_path_buf(),
+    };
+    Ok((ack_connection.endpoint, tls, ack, state))
+}
+
+fn local_os_type() -> OsType {
+    match std::env::consts::OS {
+        "macos" => OsType::Darwin,
+        "windows" => OsType::Windows,
+        "linux" => OsType::Linux,
+        other => OsType::Other(other.to_string()),
+    }
+}
+
 fn default_file_receive_dir(config_path: &Path, config: &SyncConfig) -> PathBuf {
-    config
-        .default_file_receive_dir
-        .clone()
-        .unwrap_or_else(|| config_path.with_file_name("files"))
+    config.default_file_receive_dir.clone().unwrap_or_else(|| {
+        default_downloads_receive_dir().unwrap_or_else(|| config_path.with_file_name("files"))
+    })
+}
+
+fn default_downloads_receive_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(|home| PathBuf::from(home).join("Downloads").join("CodeBaton"))
 }
 
 fn ensure_file_transfer_source_allowed(path: &Path, confirmed_sensitive: &[String]) -> Result<()> {
@@ -2856,7 +3078,7 @@ fn receive_file_transfer_data(
         file.write_all(&data.chunk)?;
         state.bytes_written += data.chunk.len() as u64;
     }
-    let completed_path = if data.done {
+    let completed = if data.done {
         if state.bytes_written != state.expected_size {
             return Err(AisyncError::Transport(format!(
                 "file transfer size mismatch for {}: expected {}, got {}",
@@ -2867,16 +3089,35 @@ fn receive_file_transfer_data(
             fs::create_dir_all(parent)?;
         }
         fs::rename(&state.tmp_path, &state.target_path)?;
-        Some(state.target_path.clone())
+        Some((
+            state.target_path.clone(),
+            state.expected_size,
+            state.filename.clone(),
+            state.sender_name.clone(),
+            state.history_config_path.clone(),
+        ))
     } else {
         None
     };
-    if let Some(completed_path) = completed_path {
+    if let Some((completed_path, bytes, filename, sender_name, history_config_path)) = completed {
         states.remove(&data.transfer_id);
+        record_file_transfer_history(
+            &history_config_path,
+            "in",
+            &sender_name,
+            &filename,
+            &completed_path,
+            bytes,
+            &data.transfer_id,
+            "received",
+            None,
+        );
         app_log(
             "file_transfer_received",
             &[
                 ("transfer_id", data.transfer_id.clone()),
+                ("filename", filename),
+                ("sender", sender_name),
                 ("path", completed_path.display().to_string()),
             ],
         );
@@ -2891,12 +3132,23 @@ fn unix_secs_now() -> u64 {
         .as_secs()
 }
 
-fn epoch_millis_now() -> String {
+fn epoch_millis_now_u64() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
-        .as_millis()
-        .to_string()
+        .as_millis() as u64
+}
+
+fn epoch_millis_now() -> String {
+    epoch_millis_now_u64().to_string()
+}
+
+fn normalize_epoch_millis(timestamp: u64) -> u64 {
+    if timestamp > 0 && timestamp < 1_000_000_000_000 {
+        timestamp.saturating_mul(1000)
+    } else {
+        timestamp
+    }
 }
 
 fn update_device_name_locked(g: &mut Inner, name: &str, onboarded: bool) -> Result<()> {
@@ -2921,24 +3173,6 @@ fn update_device_name_locked(g: &mut Inner, name: &str, onboarded: bool) -> Resu
         );
     }
     result
-}
-
-fn local_ip_addresses() -> Vec<IpAddr> {
-    // Does not send packets; it asks the OS which local address would be used.
-    let mut out = Vec::new();
-    for remote in ["192.0.2.1:9", "198.51.100.1:9"] {
-        let Ok(socket) = UdpSocket::bind("0.0.0.0:0") else {
-            continue;
-        };
-        if socket.connect(remote).is_ok() {
-            if let Ok(addr) = socket.local_addr() {
-                if !addr.ip().is_loopback() && !out.contains(&addr.ip()) {
-                    out.push(addr.ip());
-                }
-            }
-        }
-    }
-    out
 }
 
 fn directory_bytes(root: &Path) -> Result<u64> {
@@ -2971,6 +3205,110 @@ fn app_log(event: &str, fields: &[(&str, String)]) {
     log_line(&line);
 }
 
+fn append_json_line(path: &Path, entry: &serde_json::Value) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    use std::io::Write;
+    writeln!(file, "{entry}")?;
+    Ok(())
+}
+
+fn read_jsonl(path: &Path) -> Vec<serde_json::Value> {
+    let Ok(text) = fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    text.lines()
+        .filter(|line| !line.trim().is_empty())
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .collect()
+}
+
+fn record_file_transfer_history(
+    config_path: &Path,
+    direction: &str,
+    peer: &str,
+    filename: &str,
+    path: &Path,
+    bytes: u64,
+    transfer_id: &str,
+    status: &str,
+    detail: Option<String>,
+) {
+    let history_path = config_path.with_file_name("file_transfer_history.jsonl");
+    let entry = serde_json::json!({
+        "timestamp": epoch_millis_now(),
+        "transferId": transfer_id,
+        "direction": direction,
+        "peer": peer,
+        "filename": filename,
+        "path": path.display().to_string(),
+        "bytes": bytes,
+        "status": status,
+        "detail": detail,
+    });
+    match append_json_line(&history_path, &entry) {
+        Ok(()) => app_log(
+            "file_transfer_history_recorded",
+            &[
+                ("transfer_id", transfer_id.to_string()),
+                ("direction", direction.to_string()),
+                ("peer", peer.to_string()),
+                ("filename", filename.to_string()),
+                ("path", history_path.display().to_string()),
+            ],
+        ),
+        Err(error) => app_log(
+            "file_transfer_history_failed",
+            &[
+                ("transfer_id", transfer_id.to_string()),
+                ("direction", direction.to_string()),
+                ("path", history_path.display().to_string()),
+                ("error", error.to_string()),
+            ],
+        ),
+    }
+}
+
+fn record_text_message_history(
+    config_path: &Path,
+    peer_name: Option<&str>,
+    message: &TextMessagePayload,
+    mine: bool,
+) {
+    let path = config_path.with_file_name("chat_history.jsonl");
+    let peer_name = peer_name.unwrap_or(&message.sender_name);
+    let entry = serde_json::json!({
+        "timestamp": normalize_epoch_millis(message.timestamp),
+        "peerName": peer_name,
+        "senderName": message.sender_name,
+        "content": message.content,
+        "mine": mine,
+    });
+    match append_json_line(&path, &entry) {
+        Ok(()) => app_log(
+            "chat_store_appended",
+            &[
+                ("peer", peer_name.to_string()),
+                ("sender", message.sender_name.clone()),
+                ("bytes", message.content.len().to_string()),
+            ],
+        ),
+        Err(error) => app_log(
+            "chat_store_append_failed",
+            &[
+                ("peer", peer_name.to_string()),
+                ("sender", message.sender_name.clone()),
+                ("error", error.to_string()),
+            ],
+        ),
+    }
+}
+
 fn record_auto_sync_history(
     config_path: &Path,
     project_id: &str,
@@ -2982,7 +3320,9 @@ fn record_auto_sync_history(
     file_type: &str,
 ) {
     let path = config_path.with_file_name("history.jsonl");
+    let event_id = aisync_discovery::new_pairing_request_id();
     let entry = serde_json::json!({
+        "eventId": event_id,
         "timestamp": epoch_millis_now(),
         "projectId": project_id,
         "direction": "push",
@@ -3005,29 +3345,24 @@ fn record_auto_sync_history(
         ],
     );
     let result = (|| -> std::io::Result<()> {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        let mut file = fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)?;
-        use std::io::Write;
-        writeln!(file, "{entry}")?;
+        append_json_line(&path, &entry)?;
         Ok(())
     })();
     match result {
         Ok(()) => app_log(
-            "record_sync_complete",
+            "sender_sync_history_recorded",
             &[
                 ("project", project_id.to_string()),
+                ("event_id", event_id.clone()),
+                ("role", "sender".to_string()),
                 ("path", path.display().to_string()),
             ],
         ),
         Err(error) => app_log(
-            "record_sync_failed",
+            "history_write_failed",
             &[
                 ("project", project_id.to_string()),
+                ("event_id", event_id),
                 ("path", path.display().to_string()),
                 ("error", error.to_string()),
             ],
@@ -3036,6 +3371,7 @@ fn record_auto_sync_history(
 }
 
 fn record_receiver_sync_history(config_path: &Path, manifest: &SyncManifest, receive_dir: &Path) {
+    let _ = refresh_and_save_workspaces(config_path);
     if manifest.files.is_empty() {
         return;
     }
@@ -3050,7 +3386,9 @@ fn record_receiver_sync_history(config_path: &Path, manifest: &SyncManifest, rec
     if matches!(file_type, "session" | "mixed") {
         mark_incoming_session_roots(config_path);
     }
+    let event_id = aisync_discovery::new_pairing_request_id();
     let entry = serde_json::json!({
+        "eventId": event_id,
         "timestamp": epoch_millis_now(),
         "projectId": project_id,
         "direction": "receive",
@@ -3065,15 +3403,7 @@ fn record_receiver_sync_history(config_path: &Path, manifest: &SyncManifest, rec
         "fileType": file_type,
     });
     let result = (|| -> std::io::Result<()> {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        let mut file = fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)?;
-        use std::io::Write;
-        writeln!(file, "{entry}")?;
+        append_json_line(&path, &entry)?;
         Ok(())
     })();
     match result {
@@ -3081,6 +3411,7 @@ fn record_receiver_sync_history(config_path: &Path, manifest: &SyncManifest, rec
             "receiver_sync_history_recorded",
             &[
                 ("project", project_id),
+                ("event_id", event_id.clone()),
                 ("file_count", manifest.files.len().to_string()),
                 ("file_type", file_type.to_string()),
                 ("path", path.display().to_string()),
@@ -3090,11 +3421,36 @@ fn record_receiver_sync_history(config_path: &Path, manifest: &SyncManifest, rec
             "receiver_sync_history_failed",
             &[
                 ("project", project_id),
+                ("event_id", event_id),
                 ("path", path.display().to_string()),
                 ("error", error.to_string()),
             ],
         ),
     }
+}
+
+fn refresh_and_save_workspaces(config_path: &Path) -> Option<SyncConfig> {
+    let Ok(config) = load_config(config_path) else {
+        return None;
+    };
+    let (refreshed, changed) = refresh_workspaces_in_config(&config);
+    if changed {
+        if let Err(error) = save_config(config_path, &refreshed) {
+            app_log(
+                "workspace_children_persist_failed",
+                &[
+                    ("config", config_path.display().to_string()),
+                    ("error", error.to_string()),
+                ],
+            );
+            return Some(config);
+        }
+        app_log(
+            "workspace_children_refresh_notified",
+            &[("config", config_path.display().to_string())],
+        );
+    }
+    Some(refreshed)
 }
 
 fn mark_incoming_session_roots(config_path: &Path) {
@@ -3967,19 +4323,10 @@ fn start_session_mtime_scanner(config_path: PathBuf, fallback_config: SyncConfig
     std::thread::spawn(move || {
         let mut seen = HashMap::<String, SystemTime>::new();
         let mut content_seen = HashMap::<String, String>::new();
+        let mut sync_seen = HashMap::<String, String>::new();
         loop {
             let mut config = load_config(&config_path).unwrap_or_else(|_| fallback_config.clone());
-            let (refreshed_config, children_changed) = refresh_workspaces_in_config(&config);
-            if children_changed {
-                if let Err(error) = save_config(&config_path, &refreshed_config) {
-                    app_log(
-                        "workspace_children_persist_failed",
-                        &[
-                            ("config", config_path.display().to_string()),
-                            ("error", error.to_string()),
-                        ],
-                    );
-                }
+            if let Some(refreshed_config) = refresh_and_save_workspaces(&config_path) {
                 config = refreshed_config;
             }
             let interval_secs = refresh_interval_secs(&config);
@@ -4014,6 +4361,7 @@ fn start_session_mtime_scanner(config_path: PathBuf, fallback_config: SyncConfig
                     target.tool,
                     target.path.display()
                 );
+                let sync_key = format!("{}:{}:{}", target.scope, target.name, target.peer);
                 let changed = seen
                     .get(&key)
                     .map(|previous| mtime > *previous)
@@ -4032,6 +4380,9 @@ fn start_session_mtime_scanner(config_path: PathBuf, fallback_config: SyncConfig
                             ),
                             fingerprint,
                         );
+                    }
+                    if let Some(fingerprint) = sync_fingerprint_for_target(&config, &target) {
+                        sync_seen.insert(sync_key, fingerprint);
                     }
                     continue;
                 }
@@ -4075,6 +4426,24 @@ fn start_session_mtime_scanner(config_path: PathBuf, fallback_config: SyncConfig
                     continue;
                 }
 
+                let sync_fingerprint = sync_fingerprint_for_target(&config, &target);
+                if sync_fingerprint.is_some()
+                    && sync_seen.get(&sync_key) == sync_fingerprint.as_ref()
+                {
+                    app_log(
+                        "auto_sync_skipped_no_change",
+                        &[
+                            ("scope", target.scope.to_string()),
+                            ("name", target.name.clone()),
+                            ("peer", target.peer.clone()),
+                            ("tool", target.tool.to_string()),
+                            ("trigger", "mtime".to_string()),
+                            ("reason", "sync_fingerprint_unchanged".to_string()),
+                        ],
+                    );
+                    continue;
+                }
+
                 app_log(
                     "session_mtime_changed",
                     &[
@@ -4086,7 +4455,6 @@ fn start_session_mtime_scanner(config_path: PathBuf, fallback_config: SyncConfig
                     ],
                 );
 
-                let sync_key = format!("{}:{}:{}", target.scope, target.name, target.peer);
                 if !triggered.insert(sync_key) {
                     continue;
                 }
@@ -4130,6 +4498,12 @@ fn start_session_mtime_scanner(config_path: PathBuf, fallback_config: SyncConfig
 
                 match result {
                     Ok(report) => {
+                        if let Some(fingerprint) = sync_fingerprint {
+                            sync_seen.insert(
+                                format!("{}:{}:{}", target.scope, target.name, target.peer),
+                                fingerprint,
+                            );
+                        }
                         let files = (report.code_files_transferred
                             + report.session_files_transferred)
                             as u32;
@@ -4503,6 +4877,83 @@ fn workspace_auto_sync_fingerprint(
     Some(hasher.finalize().to_hex().to_string())
 }
 
+fn sync_fingerprint_for_target(config: &SyncConfig, target: &SessionMtimeTarget) -> Option<String> {
+    match target.scope {
+        "project" => project_sync_fingerprint_for_target(config, target),
+        "workspace" => workspace_sync_fingerprint_for_target(config, target),
+        _ => None,
+    }
+}
+
+fn project_sync_fingerprint_for_target(
+    config: &SyncConfig,
+    target: &SessionMtimeTarget,
+) -> Option<String> {
+    let project = config.projects.iter().find(|project| {
+        project.name == target.name && project.peers.contains_key(&target.peer) && project.enabled
+    })?;
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"project-sync");
+    hasher.update(project.name.as_bytes());
+    hasher.update(target.peer.as_bytes());
+    hash_tree_contents(&mut hasher, "code", &project.local, 8192);
+    for path in claude_mtime_paths(config, std::slice::from_ref(&project.local)) {
+        hash_tree_contents(&mut hasher, "claude", &path, 2048);
+    }
+    if target.tool == "codex" {
+        hash_codex_sessions_matching(&mut hasher, "codex", |file| {
+            codex_session_file_matches_project(file, &project.local)
+        });
+    }
+    Some(hasher.finalize().to_hex().to_string())
+}
+
+fn workspace_sync_fingerprint_for_target(
+    config: &SyncConfig,
+    target: &SessionMtimeTarget,
+) -> Option<String> {
+    let workspace = config
+        .workspaces
+        .iter()
+        .find(|workspace| workspace.name == target.name && workspace.enabled)?;
+    let peer_name = workspace.effective_peer().unwrap_or_default();
+    let remote_root = workspace
+        .effective_remote_root(peer_name)
+        .unwrap_or_else(|| workspace.remote_root.clone());
+    let refreshed = refresh_workspace_children(workspace, &remote_root).ok()?;
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"workspace-sync");
+    hasher.update(refreshed.name.as_bytes());
+    hasher.update(target.peer.as_bytes());
+    for child in &refreshed.children {
+        hasher.update(child.name.as_bytes());
+        hasher.update(&[child.enabled as u8, child.conflicted as u8]);
+    }
+    hash_tree_contents(&mut hasher, "code", refreshed.effective_local_root(), 16384);
+    let mut roots = vec![refreshed.effective_local_root().to_path_buf()];
+    roots.extend(
+        refreshed
+            .children
+            .iter()
+            .map(|child| child.local_dir.clone()),
+    );
+    for path in claude_mtime_paths(config, &roots) {
+        hash_tree_contents(&mut hasher, "claude", &path, 4096);
+    }
+    if target.tool == "codex" {
+        let excluded = refreshed
+            .children
+            .iter()
+            .filter(|child| child.conflicted || !child.enabled)
+            .map(|child| child.name.clone())
+            .collect::<HashSet<_>>();
+        hash_codex_sessions_matching(&mut hasher, "codex", |file| {
+            codex_session_file_matches_workspace(file, refreshed.effective_local_root(), &excluded)
+        });
+    }
+    Some(hasher.finalize().to_hex().to_string())
+}
+
 fn target_content_fingerprint(target: &SessionMtimeTarget) -> Option<String> {
     let mut hasher = blake3::Hasher::new();
     hasher.update(target.scope.as_bytes());
@@ -4511,6 +4962,32 @@ fn target_content_fingerprint(target: &SessionMtimeTarget) -> Option<String> {
     hasher.update(target.tool.as_bytes());
     hash_tree_contents(&mut hasher, target.tool, &target.path, 4096);
     Some(hasher.finalize().to_hex().to_string())
+}
+
+fn hash_codex_sessions_matching(
+    hasher: &mut blake3::Hasher,
+    label: &str,
+    mut matches: impl FnMut(&Path) -> bool,
+) {
+    let Some(root) = local_codex_sessions_dir() else {
+        hasher.update(label.as_bytes());
+        hasher.update(b":missing");
+        return;
+    };
+    let mut files = Vec::new();
+    if collect_jsonl_files(&root, &mut files).is_err() {
+        hasher.update(label.as_bytes());
+        hasher.update(b":scan-error");
+        return;
+    }
+    files.retain(|file| matches(file));
+    files.sort();
+    for file in files {
+        let relative = file.strip_prefix(&root).unwrap_or(&file);
+        hasher.update(label.as_bytes());
+        hasher.update(relative.to_string_lossy().as_bytes());
+        hash_file_contents(hasher, &file);
+    }
 }
 
 fn hash_tree_contents(hasher: &mut blake3::Hasher, label: &str, root: &Path, max_entries: usize) {
@@ -4550,20 +5027,26 @@ fn hash_tree_contents(hasher: &mut blake3::Hasher, label: &str, root: &Path, max
         } else if metadata.is_file() {
             hasher.update(b":file");
             hasher.update(&metadata.len().to_le_bytes());
-            if let Ok(mut file) = fs::File::open(&path) {
-                let mut buffer = [0u8; 64 * 1024];
-                loop {
-                    match file.read(&mut buffer) {
-                        Ok(0) => break,
-                        Ok(n) => hasher.update(&buffer[..n]),
-                        Err(_) => {
-                            hasher.update(b":read-error");
-                            break;
-                        }
-                    };
-                }
-            }
+            hash_file_contents(hasher, &path);
         }
+    }
+}
+
+fn hash_file_contents(hasher: &mut blake3::Hasher, path: &Path) {
+    if let Ok(mut file) = fs::File::open(path) {
+        let mut buffer = [0u8; 64 * 1024];
+        loop {
+            match file.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(n) => hasher.update(&buffer[..n]),
+                Err(_) => {
+                    hasher.update(b":read-error");
+                    break;
+                }
+            };
+        }
+    } else {
+        hasher.update(b":open-error");
     }
 }
 
@@ -6091,6 +6574,88 @@ mod tests {
     }
 
     #[test]
+    fn default_file_receive_dir_uses_downloads_codebaton_when_unset() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join("config.toml");
+        let config = SyncConfig::new("local");
+        let receive_dir = default_file_receive_dir(&config_path, &config);
+
+        if let Some(home) = std::env::var_os("HOME") {
+            assert_eq!(
+                receive_dir,
+                PathBuf::from(home).join("Downloads").join("CodeBaton")
+            );
+        } else {
+            assert_eq!(receive_dir, config_path.with_file_name("files"));
+        }
+    }
+
+    #[test]
+    fn text_message_history_normalizes_seconds_to_epoch_millis() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join("config.toml");
+        let message = TextMessagePayload {
+            sender_name: "peer".to_string(),
+            content: "hello".to_string(),
+            timestamp: 1_781_900_000,
+        };
+
+        record_text_message_history(&config_path, Some("peer"), &message, false);
+
+        let rows = read_jsonl(&tmp.path().join("chat_history.jsonl"));
+        assert_eq!(
+            rows[0].get("timestamp").and_then(|v| v.as_u64()),
+            Some(1_781_900_000_000)
+        );
+    }
+
+    #[test]
+    fn default_file_transfer_accept_targets_default_receive_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join("config.toml");
+        let receive_dir = tmp.path().join("downloads");
+        let mut config = SyncConfig::new("receiver");
+        config.default_file_receive_dir = Some(receive_dir.clone());
+        config.state_path = Some(tmp.path().join("state.toml"));
+        save_config(&config_path, &config).unwrap();
+        let request = FileTransferRequestPayload {
+            transfer_id: "transfer-1".to_string(),
+            filename: "../note.txt".to_string(),
+            size: 42,
+            sender_name: "sender".to_string(),
+            device: DeviceInfo {
+                id: DeviceId(Uuid::new_v4()),
+                name: "sender".to_string(),
+                os: OsType::Darwin,
+                addresses: vec![IpAddr::V4(Ipv4Addr::LOCALHOST)],
+                protocol_version: 1,
+            },
+            endpoint: Some(SocketAddr::from(([127, 0, 0, 1], 62000))),
+            receiver_cert_der: Some(vec![1, 2, 3]),
+            server_name: Some("aisync-receiver".to_string()),
+        };
+
+        let (_endpoint, _tls, ack, state) =
+            prepare_default_file_transfer_accept(&config_path, 52000, &request).unwrap();
+
+        assert!(ack.accepted);
+        assert!(ack.ready);
+        assert_eq!(ack.filename, "../note.txt");
+        assert_eq!(state.filename, "../note.txt");
+        assert_eq!(state.sender_name, "sender");
+        assert_eq!(state.expected_size, 42);
+        assert_eq!(
+            state.target_path,
+            receive_dir.canonicalize().unwrap().join("note.txt")
+        );
+        assert_eq!(ack.device.name, "receiver");
+        assert_eq!(
+            ack.device.addresses.first(),
+            Some(&IpAddr::V4(Ipv4Addr::LOCALHOST))
+        );
+    }
+
+    #[test]
     fn file_receive_target_must_stay_under_receive_dir() {
         let tmp = tempfile::tempdir().unwrap();
         let receive_dir = tmp.path().join("incoming");
@@ -6130,6 +6695,9 @@ mod tests {
                 tmp_path: tmp_path.clone(),
                 expected_size: 5,
                 bytes_written: 0,
+                filename: "note.txt".to_string(),
+                sender_name: "peer".to_string(),
+                history_config_path: tmp.path().join("config.toml"),
             },
         )])));
 
@@ -6699,6 +7267,111 @@ mod tests {
     }
 
     #[test]
+    fn receiver_history_refreshes_workspace_children_before_recording() {
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace_root = tmp.path().join("workspace");
+        let remote_root = tmp.path().join("remote");
+        fs::create_dir_all(workspace_root.join("old")).unwrap();
+        let mut config = SyncConfig::new("local");
+        config.state_path = Some(tmp.path().join("state.toml"));
+        config.workspaces.push(WorkspaceConfig {
+            name: "workspace".to_string(),
+            local_root: workspace_root.clone(),
+            remote_root: remote_root.clone(),
+            peer: "peer".to_string(),
+            children: workspace_children(&workspace_root, &remote_root, true).unwrap(),
+            local: workspace_root.clone(),
+            peers: HashMap::new(),
+            scan_depth: 1,
+            auto_enable_new: true,
+            sync_mode: SyncModeConfig::TwoWayAuto,
+            enabled: true,
+            exclude_rules: Vec::new(),
+        });
+        let config_path = tmp.path().join("config.toml");
+        save_config(&config_path, &config).unwrap();
+        fs::create_dir_all(workspace_root.join("new-child")).unwrap();
+        fs::write(workspace_root.join("new-child/main.rs"), b"fn main() {}\n").unwrap();
+
+        record_receiver_sync_history(
+            &config_path,
+            &SyncManifest {
+                files: vec![manifest_entry("new-child/main.rs", "hash")],
+            },
+            &workspace_root,
+        );
+
+        let persisted = load_config(&config_path).unwrap();
+        assert!(persisted.workspaces[0]
+            .children
+            .iter()
+            .any(|child| child.name == "new-child" && child.enabled));
+        let history = fs::read_to_string(tmp.path().join("history.jsonl")).unwrap();
+        assert!(history.contains("\"workspaceName\":\"workspace\""));
+        assert!(history.contains("\"childName\":\"new-child\""));
+    }
+
+    #[test]
+    fn workspace_sync_fingerprint_ignores_unrelated_codex_sessions() {
+        static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let previous = std::env::var_os("AISYNC_CODEX_SESSIONS_DIR");
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace_root = tmp.path().join("workspace");
+        let remote_root = tmp.path().join("remote");
+        let codex_sessions = tmp.path().join("codex/sessions");
+        fs::create_dir_all(workspace_root.join("app")).unwrap();
+        fs::write(workspace_root.join("app/main.rs"), b"fn main() {}\n").unwrap();
+        fs::create_dir_all(&codex_sessions).unwrap();
+        std::env::set_var("AISYNC_CODEX_SESSIONS_DIR", &codex_sessions);
+
+        let mut config = SyncConfig::new("local");
+        config.state_path = Some(tmp.path().join("state.toml"));
+        config.workspaces.push(WorkspaceConfig {
+            name: "workspace".to_string(),
+            local_root: workspace_root.clone(),
+            remote_root: remote_root.clone(),
+            peer: "peer".to_string(),
+            children: workspace_children(&workspace_root, &remote_root, true).unwrap(),
+            local: workspace_root.clone(),
+            peers: HashMap::new(),
+            scan_depth: 1,
+            auto_enable_new: true,
+            sync_mode: SyncModeConfig::TwoWayAuto,
+            enabled: true,
+            exclude_rules: Vec::new(),
+        });
+        let target = SessionMtimeTarget {
+            scope: "workspace",
+            name: "workspace".to_string(),
+            peer: "peer".to_string(),
+            tool: "codex",
+            path: codex_sessions.clone(),
+        };
+
+        let initial = sync_fingerprint_for_target(&config, &target).unwrap();
+        fs::write(
+            codex_sessions.join("unrelated.jsonl"),
+            "{\"cwd\":\"/tmp/other-project\"}\n",
+        )
+        .unwrap();
+        let unrelated = sync_fingerprint_for_target(&config, &target).unwrap();
+        fs::write(
+            codex_sessions.join("related.jsonl"),
+            format!("{{\"cwd\":\"{}\"}}\n", workspace_root.display()),
+        )
+        .unwrap();
+        let related = sync_fingerprint_for_target(&config, &target).unwrap();
+
+        match previous {
+            Some(value) => std::env::set_var("AISYNC_CODEX_SESSIONS_DIR", value),
+            None => std::env::remove_var("AISYNC_CODEX_SESSIONS_DIR"),
+        }
+        assert_eq!(initial, unrelated);
+        assert_ne!(unrelated, related);
+    }
+
+    #[test]
     fn record_auto_sync_history_creates_history_file() {
         let tmp = tempfile::tempdir().unwrap();
         let config_path = tmp.path().join("config.toml");
@@ -6856,16 +7529,29 @@ fn start_serve_daemon(
                 pending_workspace_mapping_acks.lock().unwrap().push_back(ack);
                 Ok(())
             };
-            let text_message_handler = move |message: TextMessagePayload| {
+            let text_history_config_path = history_config_path.clone();
+            let text_message_handler = move |mut message: TextMessagePayload| {
+                message.timestamp = normalize_epoch_millis(message.timestamp);
                 log_line(&format!(
                     "[message] text_message_received sender={} bytes={} timestamp={}",
                     message.sender_name,
                     message.content.len(),
                     message.timestamp
                 ));
+                record_text_message_history(&text_history_config_path, None, &message, false);
+                app_log(
+                    "text_message_enqueued",
+                    &[
+                        ("sender", message.sender_name.clone()),
+                        ("bytes", message.content.len().to_string()),
+                    ],
+                );
                 pending_text_messages.lock().unwrap().push_back(message);
                 Ok(())
             };
+            let file_request_config_path = history_config_path.clone();
+            let file_receive_states_for_requests = Arc::clone(&file_receive_states);
+            let pending_requests_for_auto_accept = Arc::clone(&pending_file_transfer_requests);
             let file_transfer_request_handler = move |request: FileTransferRequestPayload| {
                 log_line(&format!(
                     "[file] file_transfer_request_received transfer_id={} filename={} size={} sender={}",
@@ -6874,10 +7560,56 @@ fn start_serve_daemon(
                     request.size,
                     request.sender_name
                 ));
-                pending_file_transfer_requests
-                    .lock()
-                    .unwrap()
-                    .push_back(request);
+                match prepare_default_file_transfer_accept(&file_request_config_path, bound, &request) {
+                    Ok((endpoint, tls, ack, state)) => {
+                        let transfer_id = request.transfer_id.clone();
+                        let filename = request.filename.clone();
+                        let target_path = state.target_path.clone();
+                        file_receive_states_for_requests
+                            .lock()
+                            .unwrap()
+                            .insert(transfer_id.clone(), state);
+                        let states = Arc::clone(&file_receive_states_for_requests);
+                        let pending = Arc::clone(&pending_requests_for_auto_accept);
+                        std::thread::spawn(move || {
+                            if let Err(error) = send_file_transfer_ack(endpoint, tls, ack) {
+                                states.lock().unwrap().remove(&transfer_id);
+                                pending.lock().unwrap().push_back(request);
+                                app_log(
+                                    "file_transfer_auto_accept_failed",
+                                    &[
+                                        ("transfer_id", transfer_id),
+                                        ("filename", filename),
+                                        ("error", error.to_string()),
+                                    ],
+                                );
+                            } else {
+                                app_log(
+                                    "file_transfer_auto_accepted",
+                                    &[
+                                        ("transfer_id", transfer_id),
+                                        ("filename", filename),
+                                        ("target_path", target_path.display().to_string()),
+                                    ],
+                                );
+                            }
+                        });
+                    }
+                    Err(error) => {
+                        app_log(
+                            "file_transfer_pending_confirmation",
+                            &[
+                                ("transfer_id", request.transfer_id.clone()),
+                                ("filename", request.filename.clone()),
+                                ("reason", error.to_string()),
+                            ],
+                        );
+                        pending_file_transfer_requests
+                            .lock()
+                            .unwrap()
+                            .push_back(request);
+                    }
+                }
             };
             let file_transfer_ack_handler = move |ack: FileTransferAckPayload| {
                 log_line(&format!(

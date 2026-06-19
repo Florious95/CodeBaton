@@ -692,7 +692,6 @@ fn start_receive_once(target: std::path::PathBuf) -> (mpsc::Receiver<SocketAddr>
     let identity = generate_tls_identity("aisync-receiver").unwrap();
     let cert_der = identity.cert_der.clone();
     let (addr_tx, addr_rx) = mpsc::channel();
-    let port = free_port();
     let handle = thread::spawn(move || {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -701,8 +700,7 @@ fn start_receive_once(target: std::path::PathBuf) -> (mpsc::Receiver<SocketAddr>
         runtime.block_on(async move {
             let tls = TlsConfig::new(identity, "aisync-receiver");
             let service =
-                ReceiveService::bind(SocketAddr::from(([127, 0, 0, 1], port)), target, &tls)
-                    .await?;
+                ReceiveService::bind(SocketAddr::from(([127, 0, 0, 1], 0)), target, &tls).await?;
             addr_tx.send(service.local_addr()?).unwrap();
             service.receive_once(None).await?;
             Ok(())

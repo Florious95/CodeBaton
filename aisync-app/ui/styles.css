@@ -39,10 +39,10 @@
   --bg-hover: #e9ebef;
   --bg-active: #dfe2e8;
   --bg-input: #ffffff;
-  --border: #d8dbe1;
-  --border-line: #e3e5ea;
-  --border-strong: #c5c9d2;
-  --border-input: #cfd3db;
+  --border: #e7e9ed;
+  --border-line: rgba(0, 0, 0, 0.08); /* ISS-035: 柔和分隔线 */
+  --border-strong: #d3d7df;
+  --border-input: #d3d7df;
   --text: #1a1c20;
   --text-2: #33363d;
   --text-dim: #5b606b;
@@ -255,8 +255,50 @@ select.pill {
   -webkit-app-region: drag;
 }
 .titlebar .lang-toggle,
-.titlebar .lang-toggle button {
+.titlebar .lang-toggle button,
+.titlebar .titlebar-right,
+.titlebar .seg-toggle,
+.titlebar .seg-toggle button {
   -webkit-app-region: no-drag;
+}
+/* ISS-033: 标题栏右侧 主题+语言 两个分段控件 */
+.titlebar-right {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  z-index: 6;
+}
+/* 主题分段，与 lang-toggle 同款胶囊 */
+.seg-toggle {
+  display: flex;
+  align-items: center;
+  background: #161619;
+  border: 1px solid #303036;
+  border-radius: 7px;
+  padding: 2px;
+}
+:root[data-theme="light"] .seg-toggle,
+:root[data-theme="light"] .lang-toggle {
+  background: var(--bg-hover);
+  border-color: var(--border-input);
+}
+.seg-toggle button {
+  border: none;
+  background: transparent;
+  color: var(--text-faint);
+  padding: 3px 8px;
+  border-radius: 5px;
+  display: inline-flex;
+  align-items: center;
+}
+.seg-toggle button:hover:not(:disabled) {
+  filter: none;
+  color: var(--text-2);
+}
+.seg-toggle button.on {
+  background: var(--accent);
+  color: var(--accent-ink);
 }
 .titlebar .brand {
   position: absolute;
@@ -307,7 +349,6 @@ select.pill {
 
 /* 中/EN segmented toggle — lives in the title bar, right-aligned (prototype). */
 .lang-toggle {
-  margin-left: auto;
   display: flex;
   align-items: center;
   background: #161619;
@@ -705,7 +746,8 @@ select.pill {
   align-items: center;
   gap: 11px;
   padding: 9px 16px 9px 38px;
-  border-top: 1px solid #222227;
+  /* ISS-035: 用主题变量而非硬编码深色，亮色下分隔线才柔和。 */
+  border-top: 1px solid var(--border-line);
 }
 .ws-child:first-child {
   border-top: none;
@@ -1076,16 +1118,21 @@ select.pill {
 .chat-log {
   flex: 1;
   overflow-y: auto;
+  overflow-x: hidden; /* ISS-031: 容器禁止横向溢出 */
   padding: 12px 14px;
   display: flex;
   flex-direction: column;
   gap: 8px;
+  min-width: 0;
 }
 .chat-msg {
   display: flex;
   flex-direction: column;
   align-items: flex-start;
-  max-width: 75%;
+  /* ISS-031: 气泡区限宽 70%（leader 指定）；min-width:0 让 flex 项可收缩到比
+     内容窄（否则超长无空格串会把整项撑出去）。 */
+  max-width: 70%;
+  min-width: 0;
 }
 .chat-msg.mine {
   align-self: flex-end;
@@ -1099,8 +1146,19 @@ select.pill {
   padding: 7px 11px;
   font-size: 12.5px;
   color: var(--text);
+  /* ISS-031（第二次）：长 JSON/无空格串强制断行 + 不撑破。 */
   white-space: pre-wrap;
-  word-break: break-word;
+  word-break: break-all;
+  overflow-wrap: anywhere;
+  max-width: 100%;
+  min-width: 0;
+  overflow: hidden;
+}
+.chat-msg .bubble .text {
+  display: block;
+  max-width: 100%;
+  word-break: break-all;
+  overflow-wrap: anywhere;
 }
 .chat-msg.mine .bubble {
   background: var(--accent);
@@ -1162,4 +1220,38 @@ select.pill {
   border-color: var(--accent);
   background: color-mix(in srgb, var(--accent) 8%, transparent);
   color: var(--text);
+}
+
+/* ── ISS-023: 全局 radio/checkbox 与文字间距 ───────────────
+   用户报了 5 次。所有弹窗里的 radio/checkbox（不管有没有 .radio/.check 包裹）
+   都和后面的文字保留间距，避免贴在一起。 */
+input[type="radio"],
+input[type="checkbox"] {
+  margin-right: 8px !important;
+}
+/* .radio/.check 已用 flex gap 控距，避免双重间距：重置它们内部 input 的 margin-right。 */
+.radio input[type="radio"],
+.check input[type="checkbox"] {
+  margin-right: 0 !important;
+}
+
+/* ── ISS-020: Tab 未读红色数字角标 ─────────────────────── */
+.tabs .tab {
+  position: relative;
+}
+.tabs .tab .badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  margin-left: 6px;
+  border-radius: 8px;
+  background: var(--red);
+  color: #fff;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+  vertical-align: middle;
 }

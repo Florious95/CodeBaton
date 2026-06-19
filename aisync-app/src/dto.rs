@@ -344,16 +344,38 @@ pub struct TextMessageDto {
     pub sender_name: String,
     pub content: String,
     pub timestamp: u64,
+    pub peer_name: Option<String>,
+    pub mine: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FileTransferRequestDto {
+    pub id: String,
     pub transfer_id: String,
     pub filename: String,
     pub size: u64,
     pub sender_name: String,
     pub suggested_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileTransferHistoryDto {
+    pub id: String,
+    pub timestamp: u64,
+    pub timestamp_text: String,
+    pub transfer_id: String,
+    pub direction: String,
+    pub peer_name: String,
+    pub peer: String,
+    pub filename: String,
+    pub size: u64,
+    pub path: String,
+    pub save_path: Option<String>,
+    pub bytes: u64,
+    pub status: String,
+    pub detail: Option<String>,
 }
 
 // ── Workspace scan (D2) ──────────────────────────────────────────────

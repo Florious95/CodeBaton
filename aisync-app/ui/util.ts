@@ -9,8 +9,11 @@ export function fmtBytes(b: number): string {
 /** Format a backend timestamp (epoch milliseconds as string) to local date/time. */
 export function fmtTime(ts: string): string {
   if (!ts) return "";
-  const ms = Number(ts);
+  let ms = Number(ts);
   if (!Number.isFinite(ms)) return ts; // already human-readable
+  // ISS-025: 后端应传毫秒级。但防御性处理——10 位左右是秒级（否则当毫秒会显示
+  // 1970 年），<1e12 视为秒，乘以 1000 还原。
+  if (ms > 0 && ms < 1e12) ms = ms * 1000;
   const d = new Date(ms);
   const p = (n: number) => String(n).padStart(2, "0");
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;

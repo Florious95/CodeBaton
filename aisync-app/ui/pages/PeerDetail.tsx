@@ -9,7 +9,7 @@ import { ChatTab } from "../ChatTab";
 import { FileTransferTab } from "../FileTransferTab";
 
 export function PeerDetailPage({ peerId }: { peerId: string }) {
-  const { setDialog } = useStore();
+  const { setDialog, unreadChat, unreadFiles } = useStore();
   const [peer, setPeer] = useState<Peer | null>(null);
   const [projects, setProjects] = useState<Project[]>([]);
   const [history, setHistory] = useState<SyncHistoryEntry[]>([]);
@@ -80,12 +80,18 @@ export function PeerDetailPage({ peerId }: { peerId: string }) {
           onClick={() => setTab("chat")}
         >
           对话
+          {(unreadChat[peer.name] ?? 0) > 0 && (
+            <span className="badge">{unreadChat[peer.name]}</span>
+          )}
         </button>
         <button
           className={`tab ${tab === "files" ? "active" : ""}`}
           onClick={() => setTab("files")}
         >
           文件传输
+          {(unreadFiles[peer.name] ?? 0) > 0 && (
+            <span className="badge">{unreadFiles[peer.name]}</span>
+          )}
         </button>
       </div>
 
@@ -228,27 +234,31 @@ export function PeerDetailPage({ peerId }: { peerId: string }) {
         </div>
       )}
 
-      <div className="spread" style={{ marginTop: 16 }}>
-        <div className="btn-group">
-          <button
-            disabled={!online}
-            title={online ? "" : "设备离线"}
-            onClick={() => setDialog({ kind: "batch", peerId, direction: "push" })}
-          >
-            全部推送
-          </button>
-          <button
-            disabled={!online}
-            title={online ? "" : "设备离线"}
-            onClick={() => setDialog({ kind: "batch", peerId, direction: "pull" })}
-          >
-            全部拉取
+      {/* ISS-016: 全部推送/拉取/解除配对 仅在 映射关系 / 同步历史 Tab 显示，
+          对话/文件传输 Tab 不显示。 */}
+      {(tab === "mappings" || tab === "history") && (
+        <div className="spread" style={{ marginTop: 16 }}>
+          <div className="btn-group">
+            <button
+              disabled={!online}
+              title={online ? "" : "设备离线"}
+              onClick={() => setDialog({ kind: "batch", peerId, direction: "push" })}
+            >
+              全部推送
+            </button>
+            <button
+              disabled={!online}
+              title={online ? "" : "设备离线"}
+              onClick={() => setDialog({ kind: "batch", peerId, direction: "pull" })}
+            >
+              全部拉取
+            </button>
+          </div>
+          <button className="danger" onClick={() => setDialog({ kind: "unpair", peerId })}>
+            解除配对
           </button>
         </div>
-        <button className="danger" onClick={() => setDialog({ kind: "unpair", peerId })}>
-          解除配对
-        </button>
-      </div>
+      )}
       <div style={{ height: 20 }} />
     </div>
   );

@@ -1,45 +1,26 @@
 import { useEffect, useRef, useState } from "react";
 import { Copy } from "lucide-react";
-import { ipc } from "./ipc";
-import { pushToast } from "./store";
-import type { TextMessage } from "./types";
+import { pushToast, useStore } from "./store";
 import { fmtTime } from "./util";
 
 /**
- * P2「对话」Tab — 通过现有 TLS 通道与对端发纯文本消息（net 的 TextMessage 帧）。
- * 上方对话历史（新消息在下、自动滚到底），下方输入框；悬停消息显示复制图标。
- *
- * 模块顶层组件（非内联），避免父组件每 3s 轮询重渲染时被卸载重建。
+ * P2「对话」Tab — 消息来自**全局 store**（ISS-021/022），不存组件本地 state，
+ * 切 Tab/卸载不丢失。store 是唯一消息消费者；这里只读 + 发送 + 进 Tab 清未读。
+ * 模块顶层组件，避免父级 3s 轮询重渲染时被卸载重建。
  */
-type ChatEntry = TextMessage & { mine: boolean };
-
 export function ChatTab({ peerName, online }: { peerName: string; online: boolean }) {
-  const [messages, setMessages] = useState<ChatEntry[]>([]);
+  const { chatByPeer, sendChat, clearUnread } = useStore();
+  const messages = chatByPeer[peerName] ?? [];
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
   const scrollRef = useRef<HTMLDivElement | null>(null);
 
-  // 轮询入站消息（pending_text_message 是单条队列）。只收发给本机、来自该 peer 的。
+  // 进入该会话的对话 Tab → 清未读角标（ISS-020）。
   useEffect(() => {
-    let cancelled = false;
-    const poll = () =>
-      ipc
-        .pendingTextMessage()
-        .then((m) => {
-          if (cancelled || !m) return;
-          if (m.senderName !== peerName) return; // 别的设备的消息不进这个会话
-          setMessages((prev) => [...prev, { ...m, mine: false }]);
-        })
-        .catch(() => {});
-    poll();
-    const timer = window.setInterval(poll, 1000);
-    return () => {
-      cancelled = true;
-      window.clearInterval(timer);
-    };
-  }, [peerName]);
+    clearUnread(peerName, "chat");
+  }, [peerName, messages.length, clearUnread]);
 
-  // 新消息到达自动滚到底。
+  // 新消息自动滚到底。
   useEffect(() => {
     const el = scrollRef.current;
     if (el) el.scrollTop = el.scrollHeight;
@@ -49,13 +30,8 @@ export function ChatTab({ peerName, online }: { peerName: string; online: boolea
     const content = draft.trim();
     if (!content || sending) return;
     setSending(true);
-    ipc.uiLog(`chat_send peer=${peerName} bytes=${content.length}`);
     try {
-      await ipc.sendTextMessage(peerName, content);
-      setMessages((prev) => [
-        ...prev,
-        { senderName: "我", content, timestamp: Date.now(), mine: true },
-      ]);
+      await sendChat(peerName, content);
       setDraft("");
     } catch (e) {
       pushToast(`发送失败：${String(e)}`);

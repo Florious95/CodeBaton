@@ -245,6 +245,8 @@ export interface TextMessage {
   senderName: string;
   content: string;
   timestamp: number;
+  peerName?: string | null;
+  mine?: boolean | null;
 }
 
 export interface FileTransferRequest {
@@ -253,6 +255,38 @@ export interface FileTransferRequest {
   size: number;
   senderName: string;
   suggestedPath: string;
+}
+
+export interface FileTransferHistory {
+  timestamp: string;
+  transferId: string;
+  direction: "in" | "out" | string;
+  peer: string;
+  filename: string;
+  path: string;
+  bytes: number;
+  status: string;
+  detail: string | null;
+}
+
+/** 接收端待接收的文件（ISS-018）。core 的 pending_file_transfers 返回。 */
+export interface PendingFileTransfer {
+  id: string;
+  filename: string;
+  size: number;
+  senderName: string;
+}
+
+/** 传输历史一条（ISS-019），区分传入/传出。 */
+export interface FileTransferRecord {
+  id: string;
+  filename: string;
+  size: number;
+  direction: "in" | "out";
+  peerName: string;
+  status: string;
+  timestamp: number;
+  savePath?: string | null;
 }
 
 export interface ScannedChild {

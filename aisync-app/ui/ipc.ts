@@ -9,6 +9,8 @@ import type {
   BatchPlan,
   Conflict,
   FileTransferRequest,
+  FileTransferRecord,
+  PendingFileTransfer,
   LocalInfo,
   Overview,
   Pairing,
@@ -107,6 +109,25 @@ export const ipc = {
   getDefaultFileReceiveDir: () => call<string>("get_default_file_receive_dir"),
   setDefaultFileReceiveDir: (path: string) =>
     call<void>("set_default_file_receive_dir", { path }),
+  // ── ISS-017/018/019：core 的文件传输 IPC（已与 core 对齐契约）──
+  // 访达多选文件并**直接发送**给 peerName，返回 transfer_id 数组（core 定稿）。
+  pickFilesForTransfer: (peerName: string) =>
+    call<string[]>("pick_files_for_transfer", { peerName }),
+  // ISS-032: Cmd+V 粘贴已复制的文件并发送给 peerName，返回 transfer_id 数组。
+  pasteFilesForTransfer: (peerName: string) =>
+    call<string[]>("paste_files_for_transfer", { peerName }),
+  // 接收端待接收文件列表（非破坏性，可重复读）。
+  pendingFileTransfers: () => call<PendingFileTransfer[]>("pending_file_transfers"),
+  // 接收端确认接收，落到 saveDir。
+  acceptFileTransfer: (id: string, saveDir: string) =>
+    call<void>("accept_file_transfer", { id, saveDir }),
+  // 默认接收目录（leader 约定名；与上面 net 的别名指向同一后端能力，二选一对接）。
+  getDefaultReceiveDir: () => call<string>("get_default_receive_dir"),
+  setDefaultReceiveDir: (path: string) =>
+    call<void>("set_default_receive_dir", { path }),
+  // 传输历史（含接收端下载记录，ISS-019）。
+  fileTransferHistory: (peerName: string) =>
+    call<FileTransferRecord[]>("file_transfer_history", { peerName }),
   confirmPairing: (peerId: string) => call<void>("confirm_pairing", { peerId }),
   cancelPairing: (peerId: string) => call<void>("cancel_pairing", { peerId }),
   unpair: (peerId: string) => call<void>("unpair", { peerId }),

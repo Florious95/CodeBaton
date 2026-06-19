@@ -1,5 +1,5 @@
 import { useEffect } from "react";
-import { AlertCircle } from "lucide-react";
+import { AlertCircle, Moon, Sun, Monitor } from "lucide-react";
 import { Sidebar } from "./Sidebar";
 import { StatusBar } from "./StatusBar";
 import { DialogHost } from "./dialogs";
@@ -12,7 +12,8 @@ import { useShortcuts } from "./shortcuts";
 import { pushToast, useStore } from "./store";
 
 export function App() {
-  const { view, dialog, setDialog, toast, syncProgress, lang, setLang, refresh } = useStore();
+  const { view, dialog, setDialog, toast, syncProgress, lang, setLang, refresh, theme, setTheme } =
+    useStore();
   useShortcuts();
   useNotifications();
 
@@ -109,14 +110,9 @@ export function App() {
           pushToast("文件已发送");
         })
         .catch((e) => ipc.uiLog(`file_transfer_ack_poll_failed error=${String(e)}`));
-      ipc
-        .pendingTextMessage()
-        .then((message) => {
-          if (cancelled || !message) return;
-          ipc.uiLog(`text_message_received sender=${message.senderName} bytes=${message.content.length}`);
-          pushToast(`${message.senderName}: ${message.content}`);
-        })
-        .catch((e) => ipc.uiLog(`text_message_poll_failed error=${String(e)}`));
+      // ISS-022: 文本消息的唯一消费者已移到全局 store（store.tsx 轮询
+      // pendingTextMessage→写入 chatByPeer + 派生 toast）。这里不再消费，
+      // 否则会和 store 抢同一队列导致消息丢进 toast 却不进对话列表。
     };
     poll();
     const timer = window.setInterval(poll, 1000);
@@ -149,13 +145,39 @@ export function App() {
             </span>
             <span className="title">CodeBaton</span>
           </div>
-          <div className="lang-toggle">
-            <button className={lang === "zh" ? "on" : ""} onClick={() => setLang("zh")}>
-              中
-            </button>
-            <button className={lang === "en" ? "on" : ""} onClick={() => setLang("en")}>
-              EN
-            </button>
+          {/* ISS-033: 标题栏右上角 主题切换（暗/亮/跟随系统）+ 语言切换 */}
+          <div className="titlebar-right">
+            <div className="seg-toggle theme-toggle" title="主题">
+              <button
+                className={theme === "dark" ? "on" : ""}
+                title="暗色"
+                onClick={() => setTheme("dark")}
+              >
+                <Moon size={13} />
+              </button>
+              <button
+                className={theme === "light" ? "on" : ""}
+                title="亮色"
+                onClick={() => setTheme("light")}
+              >
+                <Sun size={13} />
+              </button>
+              <button
+                className={theme === "system" ? "on" : ""}
+                title="跟随系统"
+                onClick={() => setTheme("system")}
+              >
+                <Monitor size={13} />
+              </button>
+            </div>
+            <div className="lang-toggle">
+              <button className={lang === "zh" ? "on" : ""} onClick={() => setLang("zh")}>
+                中
+              </button>
+              <button className={lang === "en" ? "on" : ""} onClick={() => setLang("en")}>
+                EN
+              </button>
+            </div>
           </div>
         </div>
         <Sidebar />

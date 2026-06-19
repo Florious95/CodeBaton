@@ -1,9 +1,11 @@
 use std::collections::HashMap;
+use std::ffi::CStr;
 use std::fs;
 use std::io::ErrorKind;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream, UdpSocket};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -826,6 +828,172 @@ pub fn manual_device_from_socket_addr(
     })
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LocalInterfaceAddress {
+    name: String,
+    ip: IpAddr,
+}
+
+pub fn local_device_addresses() -> Vec<IpAddr> {
+    let mut candidates = local_interface_addresses();
+    if candidates.is_empty() {
+        candidates = route_probe_addresses();
+    }
+    if let Some(tailscale) = local_tailscale_ip() {
+        candidates.push(LocalInterfaceAddress {
+            name: "tailscale".to_string(),
+            ip: tailscale,
+        });
+    }
+    select_local_addresses(candidates)
+}
+
+fn select_local_addresses(mut candidates: Vec<LocalInterfaceAddress>) -> Vec<IpAddr> {
+    candidates.retain(|candidate| is_usable_local_ip(candidate.ip));
+    candidates.sort_by(|left, right| {
+        local_address_priority(left)
+            .cmp(&local_address_priority(right))
+            .then_with(|| left.name.cmp(&right.name))
+            .then_with(|| left.ip.to_string().cmp(&right.ip.to_string()))
+    });
+
+    let mut out = Vec::new();
+    for candidate in candidates {
+        if !out.contains(&candidate.ip) {
+            out.push(candidate.ip);
+        }
+    }
+    out
+}
+
+fn local_address_priority(candidate: &LocalInterfaceAddress) -> u8 {
+    match candidate.ip {
+        IpAddr::V4(_) if is_preferred_physical_interface(&candidate.name) => 0,
+        IpAddr::V4(ip) if is_physical_interface(&candidate.name) && !is_tailscale_ipv4(ip) => 1,
+        IpAddr::V4(ip) if is_private_lan_ipv4(ip) => 2,
+        IpAddr::V4(ip) if is_tailscale_ipv4(ip) => 3,
+        IpAddr::V4(_) => 4,
+        IpAddr::V6(_) => 5,
+    }
+}
+
+fn is_preferred_physical_interface(name: &str) -> bool {
+    matches!(name, "en0" | "en1")
+}
+
+fn is_physical_interface(name: &str) -> bool {
+    is_preferred_physical_interface(name)
+        || name.starts_with("en")
+        || name.starts_with("eth")
+        || name.starts_with("wlan")
+        || name.starts_with("wl")
+}
+
+fn is_usable_local_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => is_usable_local_ipv4(ip),
+        IpAddr::V6(ip) => {
+            !ip.is_unspecified()
+                && !ip.is_loopback()
+                && !ip.is_multicast()
+                && !ip.is_unicast_link_local()
+        }
+    }
+}
+
+fn is_usable_local_ipv4(ip: Ipv4Addr) -> bool {
+    !ip.is_unspecified()
+        && !ip.is_loopback()
+        && !ip.is_link_local()
+        && !ip.is_broadcast()
+        && !ip.is_multicast()
+        && !is_benchmark_ipv4(ip)
+}
+
+fn is_private_lan_ipv4(ip: Ipv4Addr) -> bool {
+    let octets = ip.octets();
+    octets[0] == 10
+        || (octets[0] == 172 && (16..=31).contains(&octets[1]))
+        || (octets[0] == 192 && octets[1] == 168)
+}
+
+fn is_benchmark_ipv4(ip: Ipv4Addr) -> bool {
+    let octets = ip.octets();
+    octets[0] == 198 && (18..=19).contains(&octets[1])
+}
+
+#[cfg(unix)]
+fn local_interface_addresses() -> Vec<LocalInterfaceAddress> {
+    let mut addrs: *mut libc::ifaddrs = ptr::null_mut();
+    if unsafe { libc::getifaddrs(&mut addrs) } != 0 {
+        return Vec::new();
+    }
+
+    let mut out = Vec::new();
+    let mut current = addrs;
+    while !current.is_null() {
+        let ifaddr = unsafe { &*current };
+        if !ifaddr.ifa_addr.is_null() && interface_is_up_non_loopback(ifaddr) {
+            let name = unsafe { CStr::from_ptr(ifaddr.ifa_name) }
+                .to_string_lossy()
+                .into_owned();
+            if let Some(ip) = sockaddr_ip(ifaddr.ifa_addr) {
+                out.push(LocalInterfaceAddress { name, ip });
+            }
+        }
+        current = ifaddr.ifa_next;
+    }
+    unsafe { libc::freeifaddrs(addrs) };
+    out
+}
+
+#[cfg(not(unix))]
+fn local_interface_addresses() -> Vec<LocalInterfaceAddress> {
+    Vec::new()
+}
+
+#[cfg(unix)]
+fn interface_is_up_non_loopback(ifaddr: &libc::ifaddrs) -> bool {
+    let flags = ifaddr.ifa_flags as libc::c_uint;
+    flags & libc::IFF_UP as libc::c_uint != 0 && flags & libc::IFF_LOOPBACK as libc::c_uint == 0
+}
+
+#[cfg(unix)]
+fn sockaddr_ip(sockaddr: *const libc::sockaddr) -> Option<IpAddr> {
+    let family = unsafe { (*sockaddr).sa_family as libc::c_int };
+    match family {
+        libc::AF_INET => {
+            let addr = unsafe { &*(sockaddr as *const libc::sockaddr_in) };
+            Some(IpAddr::V4(Ipv4Addr::from(u32::from_be(
+                addr.sin_addr.s_addr,
+            ))))
+        }
+        libc::AF_INET6 => {
+            let addr = unsafe { &*(sockaddr as *const libc::sockaddr_in6) };
+            Some(IpAddr::V6(Ipv6Addr::from(addr.sin6_addr.s6_addr)))
+        }
+        _ => None,
+    }
+}
+
+fn route_probe_addresses() -> Vec<LocalInterfaceAddress> {
+    let mut out = Vec::new();
+    for remote in ["192.0.2.1:9", "198.51.100.1:9"] {
+        let Ok(socket) = UdpSocket::bind("0.0.0.0:0") else {
+            continue;
+        };
+        if socket.connect(remote).is_ok() {
+            if let Ok(addr) = socket.local_addr() {
+                out.push(LocalInterfaceAddress {
+                    name: "route".to_string(),
+                    ip: addr.ip(),
+                });
+            }
+        }
+    }
+    out
+}
+
 fn service_info_for(config: &DiscoveryConfig) -> Result<ServiceInfo> {
     let instance_name = format!(
         "{}-{}",
@@ -856,7 +1024,7 @@ fn service_info_for(config: &DiscoveryConfig) -> Result<ServiceInfo> {
         .local_device
         .addresses
         .iter()
-        .any(|address| matches!(address, IpAddr::V4(_)))
+        .any(|address| matches!(address, IpAddr::V4(ip) if is_primary_ipv4(*ip)))
     {
         None
     } else {
@@ -906,7 +1074,17 @@ fn resolved_peer_from_service(service: &ServiceInfo) -> Option<ResolvedPeer> {
     let endpoint_property = service
         .get_property_val_str("endpoint_ip")
         .and_then(|value| value.parse::<IpAddr>().ok());
-    let addresses = service.get_addresses().iter().copied().collect::<Vec<_>>();
+    let mut addresses = service
+        .get_addresses()
+        .iter()
+        .copied()
+        .filter(|address| is_usable_local_ip(*address))
+        .collect::<Vec<_>>();
+    if let Some(endpoint_property) = endpoint_property {
+        if is_usable_local_ip(endpoint_property) && !addresses.contains(&endpoint_property) {
+            addresses.push(endpoint_property);
+        }
+    }
     let endpoint = preferred_endpoint_ip(
         addresses
             .iter()
@@ -948,18 +1126,18 @@ fn preferred_endpoint_ip(
     addresses
         .iter()
         .copied()
-        .find(|address| matches!(address, IpAddr::V4(ip) if is_primary_ipv4(*ip)))
+        .find(|address| matches!(address, IpAddr::V4(ip) if is_private_lan_ipv4(*ip)))
         .or_else(|| {
             addresses
                 .iter()
                 .copied()
-                .find(|address| matches!(address, IpAddr::V4(ip) if is_tailscale_ipv4(*ip)))
+                .find(|address| matches!(address, IpAddr::V4(ip) if is_primary_ipv4(*ip)))
         })
         .or_else(|| {
             addresses
                 .iter()
                 .copied()
-                .find(|address| matches!(address, IpAddr::V4(_)))
+                .find(|address| matches!(address, IpAddr::V4(ip) if is_tailscale_ipv4(*ip)))
         })
         .or_else(|| {
             addresses
@@ -975,7 +1153,7 @@ fn preferred_endpoint_ip(
 }
 
 fn is_primary_ipv4(ip: Ipv4Addr) -> bool {
-    !ip.is_unspecified() && !ip.is_loopback() && !ip.is_link_local() && !is_tailscale_ipv4(ip)
+    is_usable_local_ipv4(ip) && !is_tailscale_ipv4(ip)
 }
 
 fn is_tailscale_ipv4(ip: Ipv4Addr) -> bool {
@@ -1622,7 +1800,7 @@ mod tests {
             AISYNC_SERVICE_TYPE,
             "peer-test",
             "peer-test.local.",
-            "127.0.0.1",
+            "192.168.50.24",
             52017,
             properties,
         )
@@ -1633,7 +1811,7 @@ mod tests {
         assert_eq!(resolved.device.id, peer.id);
         assert_eq!(
             resolved.connection.endpoint,
-            Some("127.0.0.1:52017".parse().unwrap())
+            Some("192.168.50.24:52017".parse().unwrap())
         );
         assert_eq!(resolved.connection.receiver_cert_der, Some(cert));
         assert_eq!(
@@ -1679,6 +1857,61 @@ mod tests {
         );
 
         assert_eq!(selected, Some("100.75.207.88".parse().unwrap()));
+    }
+
+    #[test]
+    fn endpoint_priority_rejects_reserved_ipv4_ranges() {
+        let selected = preferred_endpoint_ip(
+            [
+                "198.18.0.1".parse::<IpAddr>().unwrap(),
+                "169.254.10.20".parse::<IpAddr>().unwrap(),
+                "127.0.0.1".parse::<IpAddr>().unwrap(),
+                "192.168.31.122".parse::<IpAddr>().unwrap(),
+            ],
+            None,
+        );
+
+        assert_eq!(selected, Some("192.168.31.122".parse().unwrap()));
+
+        let reserved_only = preferred_endpoint_ip(
+            [
+                "198.19.255.254".parse::<IpAddr>().unwrap(),
+                "169.254.10.20".parse::<IpAddr>().unwrap(),
+                "127.0.0.1".parse::<IpAddr>().unwrap(),
+            ],
+            None,
+        );
+        assert_eq!(reserved_only, None);
+    }
+
+    #[test]
+    fn local_address_selection_filters_reserved_and_prefers_physical_ipv4() {
+        let selected = select_local_addresses(vec![
+            LocalInterfaceAddress {
+                name: "utun8".to_string(),
+                ip: "198.18.0.1".parse().unwrap(),
+            },
+            LocalInterfaceAddress {
+                name: "utun4".to_string(),
+                ip: "100.75.207.88".parse().unwrap(),
+            },
+            LocalInterfaceAddress {
+                name: "en1".to_string(),
+                ip: "192.168.31.122".parse().unwrap(),
+            },
+            LocalInterfaceAddress {
+                name: "lo0".to_string(),
+                ip: "127.0.0.1".parse().unwrap(),
+            },
+        ]);
+
+        assert_eq!(
+            selected,
+            vec![
+                "192.168.31.122".parse::<IpAddr>().unwrap(),
+                "100.75.207.88".parse::<IpAddr>().unwrap(),
+            ]
+        );
     }
 
     #[test]

@@ -59,9 +59,24 @@ interface Store {
   t: Strings;
   theme: ThemePref;
   setTheme: (tm: ThemePref) => void;
+  // ── 对话/文件 全局 store (ISS-020/021/022) ──
+  chatByPeer: Record<string, ChatEntry[]>;
+  sendChat: (peerName: string, content: string) => Promise<void>;
+  unreadChat: Record<string, number>;
+  unreadFiles: Record<string, number>;
+  bumpUnreadFiles: (peerName: string, n: number) => void;
+  clearUnread: (peerName: string, which: "chat" | "files") => void;
 }
 
 export type ThemePref = "dark" | "light" | "system";
+
+/** A chat message in the global store. mine=true 表示本机发出的。 */
+export type ChatEntry = {
+  senderName: string;
+  content: string;
+  timestamp: number;
+  mine: boolean;
+};
 
 /** Resolve a theme preference to the actual theme + apply it to <html>. */
 function applyTheme(pref: ThemePref) {
@@ -106,6 +121,63 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     mq.addEventListener("change", onChange);
     return () => mq.removeEventListener("change", onChange);
   }, [theme]);
+
+  // ── 对话全局 store（ISS-021/022）：消息存这里，不随 ChatTab 卸载丢失。 ──
+  const [chatByPeer, setChatByPeer] = useState<Record<string, ChatEntry[]>>({});
+  const [unreadChat, setUnreadChat] = useState<Record<string, number>>({});
+  const [unreadFiles, setUnreadFiles] = useState<Record<string, number>>({});
+
+  const appendChat = useCallback((peerName: string, e: ChatEntry) => {
+    setChatByPeer((prev) => ({ ...prev, [peerName]: [...(prev[peerName] ?? []), e] }));
+  }, []);
+
+  const clearUnread = useCallback((peerName: string, which: "chat" | "files") => {
+    const setter = which === "chat" ? setUnreadChat : setUnreadFiles;
+    setter((prev) => (prev[peerName] ? { ...prev, [peerName]: 0 } : prev));
+  }, []);
+
+  const bumpUnreadFiles = useCallback((peerName: string, n: number) => {
+    if (n <= 0) return;
+    setUnreadFiles((prev) => ({ ...prev, [peerName]: (prev[peerName] ?? 0) + n }));
+  }, []);
+
+  const sendChat = useCallback(
+    async (peerName: string, content: string) => {
+      await ipc.sendTextMessage(peerName, content);
+      appendChat(peerName, { senderName: "我", content, timestamp: Date.now(), mine: true });
+    },
+    [appendChat],
+  );
+
+  // 单一消息消费者（ISS-022）：全局轮询 pendingTextMessage → 写入 store；
+  // toast 只是写入的副效果，不再是独立消费者。收到非当前会话的消息记未读。
+  useEffect(() => {
+    if (!ipc.inTauri()) return;
+    let cancelled = false;
+    const poll = () =>
+      ipc
+        .pendingTextMessage()
+        .then((m) => {
+          if (cancelled || !m) return;
+          appendChat(m.senderName, {
+            senderName: m.senderName,
+            content: m.content,
+            timestamp: m.timestamp || Date.now(),
+            mine: false,
+          });
+          // 未读 +1；ChatTab 打开时会立即 clearUnread 清掉，所以不在会话里才会留。
+          setUnreadChat((prev) => ({ ...prev, [m.senderName]: (prev[m.senderName] ?? 0) + 1 }));
+          setToast(`${m.senderName}: ${m.content}`);
+          setTimeout(() => setToast(null), 2600);
+        })
+        .catch(() => {});
+    poll();
+    const timer = window.setInterval(poll, 1000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [appendChat]);
 
   const refresh = useCallback(async () => {
     if (!ipc.inTauri()) return;
@@ -168,6 +240,16 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     return () => clearInterval(t);
   }, []);
 
+  // ISS-036: 定时重新拉 overview，让新发现的工作区子项目/项目自动出现在首页，
+  // 不必手动刷新。5s 一次，避免太频繁。
+  useEffect(() => {
+    if (!ipc.inTauri()) return;
+    const t = setInterval(() => {
+      ipc.getOverview().then(setOverview).catch(() => {});
+    }, 5000);
+    return () => clearInterval(t);
+  }, []);
+
   return (
     <Ctx.Provider
       value={{
@@ -189,6 +271,12 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         t: dict[lang],
         theme,
         setTheme,
+        chatByPeer,
+        sendChat,
+        unreadChat,
+        unreadFiles,
+        bumpUnreadFiles,
+        clearUnread,
       }}
     >
       <ToastSetter setToast={setToast} />

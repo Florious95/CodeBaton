@@ -8,6 +8,8 @@
 //! still seeded from [`AppState`] so the UI stays populated; those seams are
 //! marked and shrink as the backend grows.
 
+#[cfg(target_os = "macos")]
+use std::process::Command;
 use std::thread;
 
 use aisync_core::Direction;
@@ -97,6 +99,116 @@ fn history_entries(backend: &Backend, project_id: &str) -> Vec<SyncHistoryEntry>
                 .map(|s| s.to_string()),
         })
         .collect()
+}
+
+fn text_message_entries(backend: &Backend, peer_name: Option<&str>) -> Vec<TextMessageDto> {
+    backend
+        .text_messages(peer_name)
+        .into_iter()
+        .map(|v| TextMessageDto {
+            sender_name: v
+                .get("senderName")
+                .and_then(|t| t.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            content: v
+                .get("content")
+                .and_then(|t| t.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            timestamp: normalize_epoch_millis(
+                v.get("timestamp").and_then(|t| t.as_u64()).unwrap_or(0),
+            ),
+            peer_name: v
+                .get("peerName")
+                .and_then(|t| t.as_str())
+                .map(|s| s.to_string()),
+            mine: v.get("mine").and_then(|t| t.as_bool()),
+        })
+        .collect()
+}
+
+fn normalize_epoch_millis(timestamp: u64) -> u64 {
+    if timestamp > 0 && timestamp < 1_000_000_000_000 {
+        timestamp.saturating_mul(1000)
+    } else {
+        timestamp
+    }
+}
+
+fn file_transfer_history_entries(
+    backend: &Backend,
+    peer_name: Option<&str>,
+) -> Vec<FileTransferHistoryDto> {
+    let mut rows: Vec<FileTransferHistoryDto> = backend
+        .file_transfer_history(peer_name)
+        .into_iter()
+        .map(|v| FileTransferHistoryDto {
+            id: v
+                .get("transferId")
+                .and_then(|t| t.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            timestamp: v
+                .get("timestamp")
+                .and_then(|t| t.as_str())
+                .and_then(|t| t.parse::<u64>().ok())
+                .or_else(|| v.get("timestamp").and_then(|t| t.as_u64()))
+                .unwrap_or(0),
+            timestamp_text: v
+                .get("timestamp")
+                .and_then(|t| t.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            transfer_id: v
+                .get("transferId")
+                .and_then(|t| t.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            direction: v
+                .get("direction")
+                .and_then(|t| t.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            peer_name: v
+                .get("peer")
+                .and_then(|t| t.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            peer: v
+                .get("peer")
+                .and_then(|t| t.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            filename: v
+                .get("filename")
+                .and_then(|t| t.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            size: v.get("bytes").and_then(|t| t.as_u64()).unwrap_or(0),
+            path: v
+                .get("path")
+                .and_then(|t| t.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            save_path: v
+                .get("path")
+                .and_then(|t| t.as_str())
+                .map(|s| s.to_string()),
+            bytes: v.get("bytes").and_then(|t| t.as_u64()).unwrap_or(0),
+            status: v
+                .get("status")
+                .and_then(|t| t.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            detail: v
+                .get("detail")
+                .and_then(|t| t.as_str())
+                .map(|s| s.to_string()),
+        })
+        .collect();
+    rows.sort_by(|left, right| right.timestamp.cmp(&left.timestamp));
+    rows
 }
 
 /// Build the real local-device info from config + live discovery. Hostname and
@@ -752,7 +864,14 @@ pub fn pending_text_message(backend: State<Backend>) -> Option<TextMessageDto> {
         sender_name: message.sender_name,
         content: message.content,
         timestamp: message.timestamp,
+        peer_name: None,
+        mine: Some(false),
     })
+}
+
+#[tauri::command]
+pub fn text_messages(backend: State<Backend>, peer_name: Option<String>) -> Vec<TextMessageDto> {
+    text_message_entries(&backend, peer_name.as_deref())
 }
 
 #[tauri::command]
@@ -780,16 +899,164 @@ pub fn request_file_transfer(
 }
 
 #[tauri::command]
+pub async fn pick_files_for_transfer(
+    app: AppHandle,
+    backend: State<'_, Backend>,
+    peer_name: String,
+    confirmed_sensitive: Option<Vec<String>>,
+) -> std::result::Result<Vec<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    crate::backend::log_line("[file] file_picker_opened");
+    let paths: Vec<std::path::PathBuf> = app
+        .dialog()
+        .file()
+        .blocking_pick_files()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|path| path.into_path().map_err(|e| e.to_string()))
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    if paths.is_empty() {
+        crate::backend::log_line("[file] file_picker_cancelled");
+        return Ok(Vec::new());
+    }
+    crate::backend::log_line(&format!(
+        "[file] file_picker_selected count={}",
+        paths.len()
+    ));
+    let confirmed = confirmed_sensitive.unwrap_or_default();
+    let mut transfer_ids = Vec::with_capacity(paths.len());
+    for path in paths {
+        crate::backend::log_line(&format!(
+            "[file] file_picker_send_start peer={} path={}",
+            peer_name,
+            path.display()
+        ));
+        match backend.request_file_transfer(&peer_name, path.clone(), &confirmed) {
+            Ok(id) => transfer_ids.push(id),
+            Err(error) => {
+                crate::backend::log_line(&format!(
+                    "[file] file_picker_send_failed peer={} path={} error={}",
+                    peer_name,
+                    path.display(),
+                    error
+                ));
+                return Err(error.to_string());
+            }
+        }
+    }
+    crate::backend::log_line(&format!(
+        "[file] file_picker_send_queued count={} peer={}",
+        transfer_ids.len(),
+        peer_name
+    ));
+    Ok(transfer_ids)
+}
+
+#[tauri::command]
+pub fn paste_files_for_transfer(
+    backend: State<Backend>,
+    peer_name: String,
+    confirmed_sensitive: Option<Vec<String>>,
+) -> std::result::Result<Vec<String>, String> {
+    let paths = clipboard_file_paths()?;
+    if paths.is_empty() {
+        crate::backend::log_line("[file] paste_files_empty");
+        return Ok(Vec::new());
+    }
+    crate::backend::log_line(&format!(
+        "[file] paste_files_selected count={}",
+        paths.len()
+    ));
+    let confirmed = confirmed_sensitive.unwrap_or_default();
+    let mut transfer_ids = Vec::with_capacity(paths.len());
+    for path in paths {
+        transfer_ids.push(
+            backend
+                .request_file_transfer(&peer_name, path, &confirmed)
+                .map_err(|e| e.to_string())?,
+        );
+    }
+    Ok(transfer_ids)
+}
+
+#[cfg(target_os = "macos")]
+fn clipboard_file_paths() -> std::result::Result<Vec<std::path::PathBuf>, String> {
+    let script = r#"
+ObjC.import("AppKit");
+ObjC.import("Foundation");
+const pb = $.NSPasteboard.generalPasteboard;
+const classes = $.NSArray.arrayWithObject($.NSURL.class);
+const opts = $.NSDictionary.dictionaryWithObjectForKey(
+  $.NSNumber.numberWithBool(true),
+  $.NSPasteboardURLReadingFileURLsOnlyKey
+);
+const urls = pb.readObjectsForClassesOptions(classes, opts);
+const out = [];
+if (urls) {
+  for (let i = 0; i < urls.count; i++) {
+    const path = ObjC.unwrap(urls.objectAtIndex(i).path);
+    if (path) out.push(path);
+  }
+}
+out.join("\n");
+"#;
+    let output = Command::new("osascript")
+        .arg("-l")
+        .arg("JavaScript")
+        .arg("-e")
+        .arg(script)
+        .output()
+        .map_err(|e| format!("read clipboard files: {e}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("read clipboard files failed: {}", stderr.trim()));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(std::path::PathBuf::from)
+        .collect())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn clipboard_file_paths() -> std::result::Result<Vec<std::path::PathBuf>, String> {
+    Ok(Vec::new())
+}
+
+#[tauri::command]
 pub fn pending_file_transfer_request(backend: State<Backend>) -> Option<FileTransferRequestDto> {
     let request = backend.take_pending_file_transfer_request()?;
     let suggested_path = backend.suggested_file_receive_path(&request.filename);
+    let id = request.transfer_id.clone();
     Some(FileTransferRequestDto {
+        id,
         transfer_id: request.transfer_id,
         filename: request.filename,
         size: request.size,
         sender_name: request.sender_name,
         suggested_path: suggested_path.to_string_lossy().into_owned(),
     })
+}
+
+#[tauri::command]
+pub fn pending_file_transfers(backend: State<Backend>) -> Vec<FileTransferRequestDto> {
+    backend
+        .pending_file_transfers()
+        .into_iter()
+        .map(|request| {
+            let suggested_path = backend.suggested_file_receive_path(&request.filename);
+            let id = request.transfer_id.clone();
+            FileTransferRequestDto {
+                id,
+                transfer_id: request.transfer_id,
+                filename: request.filename,
+                size: request.size,
+                sender_name: request.sender_name,
+                suggested_path: suggested_path.to_string_lossy().into_owned(),
+            }
+        })
+        .collect()
 }
 
 #[tauri::command]
@@ -800,6 +1067,17 @@ pub fn confirm_file_transfer_request(
 ) -> std::result::Result<(), String> {
     backend
         .confirm_file_transfer_request(&transfer_id, target_path.into())
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn accept_file_transfer(
+    backend: State<Backend>,
+    id: String,
+    save_dir: String,
+) -> std::result::Result<(), String> {
+    backend
+        .accept_file_transfer(&id, save_dir.into())
         .map_err(|e| e.to_string())
 }
 
@@ -819,6 +1097,11 @@ pub fn get_default_file_receive_dir(backend: State<Backend>) -> String {
 }
 
 #[tauri::command]
+pub fn get_default_receive_dir(backend: State<Backend>) -> String {
+    get_default_file_receive_dir(backend)
+}
+
+#[tauri::command]
 pub fn set_default_file_receive_dir(
     backend: State<Backend>,
     path: String,
@@ -826,6 +1109,22 @@ pub fn set_default_file_receive_dir(
     backend
         .set_default_file_receive_dir(path.into())
         .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn set_default_receive_dir(
+    backend: State<Backend>,
+    path: String,
+) -> std::result::Result<(), String> {
+    set_default_file_receive_dir(backend, path)
+}
+
+#[tauri::command]
+pub fn file_transfer_history(
+    backend: State<Backend>,
+    peer_name: Option<String>,
+) -> Vec<FileTransferHistoryDto> {
+    file_transfer_history_entries(&backend, peer_name.as_deref())
 }
 
 #[tauri::command]
