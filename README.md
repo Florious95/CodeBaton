@@ -4,7 +4,7 @@
 
 把正在跑的 AI 编程会话，在局域网内交给另一台机器接管运行。代码、未提交的改动、对话历史，整体搬过去——跑完再搬回来。全程不出本地网络。
 
-![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-2E5BFF) ![Platforms](https://img.shields.io/badge/platform-macOS%20%C2%B7%20Windows%20%C2%B7%20Linux-555) ![Zero-cloud](https://img.shields.io/badge/cloud-zero-2E5BFF)
+![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-2E5BFF) ![Platform](https://img.shields.io/badge/platform-macOS%20(Apple%20Silicon)-555) ![Zero-cloud](https://img.shields.io/badge/cloud-zero-2E5BFF)
 
 > **不是远程桌面，不是云。** 是把执行负载真正搬到你自己的另一台机器，把主力机还给你。
 
