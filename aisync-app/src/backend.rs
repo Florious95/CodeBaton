@@ -39,6 +39,8 @@ use aisync_transport::{
 };
 
 const AUTO_SYNC_COOLDOWN: Duration = Duration::from_secs(90);
+const FILE_TRANSFER_CONTROL_TIMEOUT: Duration = Duration::from_secs(10);
+const HISTORY_FILE_LIMIT: usize = 5;
 static INCOMING_SYNC_SUPPRESSIONS: OnceLock<Mutex<HashMap<PathBuf, Instant>>> = OnceLock::new();
 
 fn incoming_sync_suppressions() -> &'static Mutex<HashMap<PathBuf, Instant>> {
@@ -448,7 +450,17 @@ impl Backend {
     ) -> Result<String> {
         let (transfer_id, endpoint, tls, request) = {
             let mut g = self.inner.lock().unwrap();
-            let metadata = fs::metadata(&path)?;
+            let metadata = fs::metadata(&path).map_err(|error| {
+                app_log(
+                    "ft_metadata_failed",
+                    &[
+                        ("peer", peer_name.to_string()),
+                        ("path", path.display().to_string()),
+                        ("error", error.to_string()),
+                    ],
+                );
+                AisyncError::from(error)
+            })?;
             if !metadata.is_file() {
                 return Err(AisyncError::Config(format!(
                     "file transfer source is not a file: {}",
@@ -464,8 +476,33 @@ impl Backend {
                         path.display()
                     ))
                 })?;
+            app_log(
+                "ft_metadata_ok",
+                &[
+                    ("peer", peer_name.to_string()),
+                    ("path", path.display().to_string()),
+                    ("filename", filename.clone()),
+                    ("size", metadata.len().to_string()),
+                ],
+            );
             ensure_file_transfer_source_allowed(&path, confirmed_sensitive)?;
+            app_log(
+                "ft_sensitive_ok",
+                &[
+                    ("peer", peer_name.to_string()),
+                    ("path", path.display().to_string()),
+                    ("confirmed_count", confirmed_sensitive.len().to_string()),
+                ],
+            );
             let (endpoint, tls) = control_connection_for_peer(&g, peer_name)?;
+            app_log(
+                "ft_peer_endpoint_resolved",
+                &[
+                    ("peer", peer_name.to_string()),
+                    ("endpoint", endpoint.to_string()),
+                    ("server_name", tls.server_name.clone()),
+                ],
+            );
             let peer_endpoint = endpoint;
             let local_device = g.discoverer.local_device().clone();
             let serve = g
@@ -480,6 +517,14 @@ impl Backend {
                     error
                 ))
             })?;
+            app_log(
+                "ft_cert_loaded",
+                &[
+                    ("peer", peer_name.to_string()),
+                    ("cert_path", serve.cert_path.display().to_string()),
+                    ("cert_bytes", receiver_cert_der.len().to_string()),
+                ],
+            );
             let transfer_id = aisync_discovery::new_pairing_request_id();
             let request = FileTransferRequestPayload {
                 transfer_id: transfer_id.clone(),
@@ -501,11 +546,37 @@ impl Backend {
             (transfer_id, endpoint, tls, request)
         };
 
+        app_log(
+            "ft_control_send_start",
+            &[
+                ("transfer_id", transfer_id.clone()),
+                ("peer", peer_name.to_string()),
+                ("endpoint", endpoint.to_string()),
+                ("filename", request.filename.clone()),
+            ],
+        );
         if let Err(error) = send_file_transfer_request(endpoint, tls, request.clone()) {
             let mut g = self.inner.lock().unwrap();
             g.outbound_file_transfers.remove(&transfer_id);
+            app_log(
+                "ft_control_send_failed",
+                &[
+                    ("transfer_id", transfer_id.clone()),
+                    ("peer", peer_name.to_string()),
+                    ("filename", request.filename),
+                    ("error", error.to_string()),
+                ],
+            );
             return Err(error);
         }
+        app_log(
+            "ft_control_send_ok",
+            &[
+                ("transfer_id", transfer_id.clone()),
+                ("peer", peer_name.to_string()),
+                ("filename", request.filename.clone()),
+            ],
+        );
         app_log(
             "file_transfer_request_sent",
             &[
@@ -824,12 +895,41 @@ impl Backend {
         workspace_name: Option<&str>,
         child_name: Option<&str>,
     ) {
-        let path = self
-            .inner
-            .lock()
-            .unwrap()
-            .config_path
-            .with_file_name("history.jsonl");
+        let (path, summary) = {
+            let g = self.inner.lock().unwrap();
+            let summary = if success {
+                history_summary_from_config(
+                    &g.config,
+                    project_id,
+                    workspace_name,
+                    child_name,
+                    "mixed",
+                )
+            } else {
+                HistoryFileSummary::default()
+            };
+            (g.config_path.with_file_name("history.jsonl"), summary)
+        };
+        let bytes = if success && bytes == 0 {
+            summary.bytes
+        } else {
+            bytes
+        };
+        let file_path = summary.file_paths.first().cloned();
+        let file_name = file_path.as_deref().and_then(|path| {
+            Path::new(path)
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+        });
+        let file_names: Vec<String> = summary
+            .file_paths
+            .iter()
+            .filter_map(|path| {
+                Path::new(path)
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+            })
+            .collect();
         let event_id = aisync_discovery::new_pairing_request_id();
         let entry = serde_json::json!({
             "eventId": event_id,
@@ -845,6 +945,10 @@ impl Backend {
             "trigger": "manual",
             "role": "sender",
             "fileType": "mixed",
+            "file_path": file_path,
+            "file_paths": summary.file_paths,
+            "file_name": file_name,
+            "file_names": file_names,
         });
         match append_json_line(&path, &entry) {
             Ok(()) => app_log(
@@ -2628,8 +2732,18 @@ fn send_file_transfer_request(
         .build()
         .map_err(|error| AisyncError::Transport(format!("tokio runtime: {error}")))?;
     runtime.block_on(async move {
-        let mut client = TcpTransporter::connect_addr(endpoint, &tls).await?;
-        client.send_file_transfer_request(request).await
+        tokio::time::timeout(FILE_TRANSFER_CONTROL_TIMEOUT, async move {
+            let mut client = TcpTransporter::connect_addr(endpoint, &tls).await?;
+            client.send_file_transfer_request(request).await
+        })
+        .await
+        .map_err(|_| {
+            AisyncError::Transport(format!(
+                "file transfer control request timed out after {}ms to {}",
+                FILE_TRANSFER_CONTROL_TIMEOUT.as_millis(),
+                endpoint
+            ))
+        })?
     })
 }
 
@@ -3309,6 +3423,172 @@ fn record_text_message_history(
     }
 }
 
+#[derive(Debug, Clone, Default)]
+struct HistoryFileSummary {
+    bytes: u64,
+    file_paths: Vec<String>,
+}
+
+impl HistoryFileSummary {
+    fn add_file(&mut self, path: &Path) {
+        if let Ok(metadata) = fs::metadata(path) {
+            if metadata.is_file() {
+                self.bytes = self.bytes.saturating_add(metadata.len());
+                if self.file_paths.len() < HISTORY_FILE_LIMIT {
+                    self.file_paths.push(path.display().to_string());
+                }
+            }
+        }
+    }
+}
+
+fn history_summary_from_config(
+    config: &SyncConfig,
+    project_id: &str,
+    workspace_name: Option<&str>,
+    child_name: Option<&str>,
+    file_type: &str,
+) -> HistoryFileSummary {
+    if let Some(workspace_name) = workspace_name {
+        if let Some(workspace) = config
+            .workspaces
+            .iter()
+            .find(|workspace| workspace.name == workspace_name)
+        {
+            return workspace_history_summary(config, workspace, child_name, file_type);
+        }
+    }
+    if let Some(workspace) = config
+        .workspaces
+        .iter()
+        .find(|workspace| workspace.name == project_id)
+    {
+        return workspace_history_summary(config, workspace, child_name, file_type);
+    }
+    if let Some(workspace) = config.workspaces.iter().find(|workspace| {
+        workspace
+            .children
+            .iter()
+            .any(|child| child.name == project_id)
+    }) {
+        return workspace_history_summary(config, workspace, Some(project_id), file_type);
+    }
+    if let Some(project) = config
+        .projects
+        .iter()
+        .find(|project| project.name == project_id)
+    {
+        return project_history_summary(config, project, file_type);
+    }
+    HistoryFileSummary::default()
+}
+
+fn project_history_summary(
+    config: &SyncConfig,
+    project: &ProjectConfig,
+    file_type: &str,
+) -> HistoryFileSummary {
+    let mut summary = HistoryFileSummary::default();
+    if matches!(file_type, "code" | "mixed") {
+        add_tree_history_summary(&mut summary, &project.local);
+    }
+    if matches!(file_type, "session" | "mixed") {
+        for path in claude_mtime_paths(config, std::slice::from_ref(&project.local)) {
+            add_tree_history_summary(&mut summary, &path);
+        }
+        add_codex_history_summary(&mut summary, |file| {
+            codex_session_file_matches_project(file, &project.local)
+        });
+    }
+    summary
+}
+
+fn workspace_history_summary(
+    config: &SyncConfig,
+    workspace: &WorkspaceConfig,
+    child_name: Option<&str>,
+    file_type: &str,
+) -> HistoryFileSummary {
+    let mut summary = HistoryFileSummary::default();
+    let roots: Vec<PathBuf> = if let Some(child_name) = child_name {
+        workspace
+            .children
+            .iter()
+            .find(|child| child.name == child_name)
+            .map(|child| vec![child.local_dir.clone()])
+            .unwrap_or_default()
+    } else {
+        vec![workspace.effective_local_root().to_path_buf()]
+    };
+    if matches!(file_type, "code" | "mixed") {
+        for root in &roots {
+            add_tree_history_summary(&mut summary, root);
+        }
+    }
+    if matches!(file_type, "session" | "mixed") {
+        for path in claude_mtime_paths(config, &roots) {
+            add_tree_history_summary(&mut summary, &path);
+        }
+        let excluded = workspace
+            .children
+            .iter()
+            .filter(|child| child.conflicted || !child.enabled)
+            .map(|child| child.name.clone())
+            .collect::<HashSet<_>>();
+        add_codex_history_summary(&mut summary, |file| {
+            if let Some(child_root) = roots.first().filter(|_| child_name.is_some()) {
+                codex_session_file_matches_project(file, child_root)
+            } else {
+                codex_session_file_matches_workspace(
+                    file,
+                    workspace.effective_local_root(),
+                    &excluded,
+                )
+            }
+        });
+    }
+    summary
+}
+
+fn add_tree_history_summary(summary: &mut HistoryFileSummary, root: &Path) {
+    if !root.exists() || should_skip_hash_path(root) {
+        return;
+    }
+    let Ok(metadata) = fs::metadata(root) else {
+        return;
+    };
+    if metadata.is_file() {
+        summary.add_file(root);
+        return;
+    }
+    let Ok(entries) = fs::read_dir(root) else {
+        return;
+    };
+    let mut paths: Vec<PathBuf> = entries.flatten().map(|entry| entry.path()).collect();
+    paths.sort();
+    for path in paths {
+        add_tree_history_summary(summary, &path);
+    }
+}
+
+fn add_codex_history_summary(
+    summary: &mut HistoryFileSummary,
+    mut matches: impl FnMut(&Path) -> bool,
+) {
+    let Some(root) = local_codex_sessions_dir() else {
+        return;
+    };
+    let mut files = Vec::new();
+    if collect_jsonl_files(&root, &mut files).is_err() {
+        return;
+    }
+    files.retain(|file| matches(file));
+    files.sort();
+    for file in files {
+        summary.add_file(&file);
+    }
+}
+
 fn record_auto_sync_history(
     config_path: &Path,
     project_id: &str,
@@ -3320,6 +3600,39 @@ fn record_auto_sync_history(
     file_type: &str,
 ) {
     let path = config_path.with_file_name("history.jsonl");
+    let summary = if success {
+        load_config(config_path)
+            .ok()
+            .map(|config| {
+                history_summary_from_config(
+                    &config,
+                    project_id,
+                    workspace_name,
+                    child_name,
+                    file_type,
+                )
+            })
+            .unwrap_or_default()
+    } else {
+        HistoryFileSummary::default()
+    };
+    let bytes = summary.bytes;
+    let file_paths = summary.file_paths.clone();
+    let file_path = summary.file_paths.first().cloned();
+    let file_name = file_path.as_deref().and_then(|path| {
+        Path::new(path)
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+    });
+    let file_names: Vec<String> = summary
+        .file_paths
+        .iter()
+        .filter_map(|path| {
+            Path::new(path)
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+        })
+        .collect();
     let event_id = aisync_discovery::new_pairing_request_id();
     let entry = serde_json::json!({
         "eventId": event_id,
@@ -3328,13 +3641,17 @@ fn record_auto_sync_history(
         "direction": "push",
         "success": success,
         "files": files,
-        "bytes": 0,
+        "bytes": bytes,
         "detail": detail,
         "workspaceName": workspace_name,
         "childName": child_name,
         "trigger": "auto",
         "role": "sender",
         "fileType": file_type,
+        "file_path": file_path,
+        "file_paths": file_paths,
+        "file_name": file_name,
+        "file_names": file_names,
     });
     app_log(
         "record_sync_started",
@@ -3342,6 +3659,15 @@ fn record_auto_sync_history(
             ("project", project_id.to_string()),
             ("trigger", "auto".to_string()),
             ("success", success.to_string()),
+            ("bytes", bytes.to_string()),
+            (
+                "file_path",
+                entry
+                    .get("file_path")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+            ),
         ],
     );
     let result = (|| -> std::io::Result<()> {
@@ -4324,6 +4650,7 @@ fn start_session_mtime_scanner(config_path: PathBuf, fallback_config: SyncConfig
         let mut seen = HashMap::<String, SystemTime>::new();
         let mut content_seen = HashMap::<String, String>::new();
         let mut sync_seen = HashMap::<String, String>::new();
+        let mut initialized = false;
         loop {
             let mut config = load_config(&config_path).unwrap_or_else(|_| fallback_config.clone());
             if let Some(refreshed_config) = refresh_and_save_workspaces(&config_path) {
@@ -4362,10 +4689,10 @@ fn start_session_mtime_scanner(config_path: PathBuf, fallback_config: SyncConfig
                     target.path.display()
                 );
                 let sync_key = format!("{}:{}:{}", target.scope, target.name, target.peer);
-                let changed = seen
-                    .get(&key)
-                    .map(|previous| mtime > *previous)
-                    .unwrap_or(false);
+                let changed = match seen.get(&key) {
+                    Some(previous) => mtime > *previous,
+                    None => initialized,
+                };
                 seen.insert(key, mtime);
                 if !changed {
                     if let Some(fingerprint) = target_content_fingerprint(&target) {
@@ -4575,6 +4902,7 @@ fn start_session_mtime_scanner(config_path: PathBuf, fallback_config: SyncConfig
             }
 
             std::thread::sleep(Duration::from_secs(interval_secs));
+            initialized = true;
         }
     });
 }
@@ -7382,6 +7710,76 @@ mod tests {
         assert!(text.contains("\"projectId\":\"proj\""));
         assert!(text.contains("\"trigger\":\"auto\""));
         assert!(text.contains("\"files\":3"));
+    }
+
+    #[test]
+    fn record_auto_sync_history_records_bytes_and_file_paths() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join("config.toml");
+        let project_dir = tmp.path().join("project");
+        fs::create_dir_all(&project_dir).unwrap();
+        fs::write(project_dir.join("main.rs"), b"fn main() {}\n").unwrap();
+        let mut config = SyncConfig::new("local");
+        config.state_path = Some(tmp.path().join("state.toml"));
+        config.projects.push(ProjectConfig {
+            name: "proj".to_string(),
+            local: project_dir.clone(),
+            peers: HashMap::from([("peer".to_string(), tmp.path().join("remote"))]),
+            sync_mode: SyncModeConfig::OneWayPush,
+            enabled: true,
+            exclude_rules: Vec::new(),
+        });
+        save_config(&config_path, &config).unwrap();
+
+        record_auto_sync_history(&config_path, "proj", true, 1, None, None, None, "mixed");
+
+        let rows = read_jsonl(&tmp.path().join("history.jsonl"));
+        assert_eq!(
+            rows[0].get("bytes").and_then(|value| value.as_u64()),
+            Some(13)
+        );
+        assert_eq!(
+            rows[0].get("file_name").and_then(|value| value.as_str()),
+            Some("main.rs")
+        );
+        assert!(rows[0]
+            .get("file_paths")
+            .and_then(|value| value.as_array())
+            .is_some_and(|paths| paths
+                .iter()
+                .any(|path| path.as_str().unwrap_or_default().ends_with("main.rs"))));
+    }
+
+    #[test]
+    fn empty_project_session_history_summary_detects_claude_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project_dir = tmp.path().join("empty-project");
+        let claude_dir = tmp.path().join(".claude");
+        fs::create_dir_all(&project_dir).unwrap();
+        let session_dir = claude_dir
+            .join("projects")
+            .join(claude_project_dir_name(&project_dir));
+        fs::create_dir_all(&session_dir).unwrap();
+        fs::write(session_dir.join("s.jsonl"), b"{\"type\":\"user\"}\n").unwrap();
+        let mut config = SyncConfig::new("local");
+        config.state_path = Some(tmp.path().join("state.toml"));
+        config.claude_config.local = claude_dir;
+        config.projects.push(ProjectConfig {
+            name: "empty".to_string(),
+            local: project_dir,
+            peers: HashMap::from([("peer".to_string(), tmp.path().join("remote"))]),
+            sync_mode: SyncModeConfig::OneWayPush,
+            enabled: true,
+            exclude_rules: Vec::new(),
+        });
+
+        let summary = history_summary_from_config(&config, "empty", None, None, "session");
+
+        assert_eq!(summary.bytes, 16);
+        assert!(summary
+            .file_paths
+            .iter()
+            .any(|path| path.ends_with("s.jsonl")));
     }
 
     fn manifest_entry(relative_path: &str, hash: &str) -> aisync_core::FileEntry {
