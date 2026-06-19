@@ -1,0 +1,64 @@
+name: Build macOS DMG
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-14
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: '. -> target'
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install frontend dependencies
+        working-directory: aisync-app
+        run: npm ci
+
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli@2.1.0
+
+      - name: Build DMG
+        working-directory: aisync-app
+        run: cargo tauri build --target aarch64-apple-darwin
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ''
+
+      - name: Post-process DMG (remove VolumeIcon + DS_Store)
+        run: |
+          DMG_PATH=$(find target/aarch64-apple-darwin/release/bundle/dmg -name '*.dmg' | head -1)
+          if [ -n "$DMG_PATH" ] && [ -f aisync-app/scripts/hide-dmg-volicon.sh ]; then
+            bash aisync-app/scripts/hide-dmg-volicon.sh "$DMG_PATH"
+          fi
+
+      - name: Upload DMG artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: CodeBaton-macOS-arm64
+          path: target/aarch64-apple-darwin/release/bundle/dmg/*.dmg
+
+      - name: Upload to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: target/aarch64-apple-darwin/release/bundle/dmg/*.dmg
+          generate_release_notes: true
