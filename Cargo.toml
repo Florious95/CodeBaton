@@ -1,0 +1,27 @@
+[workspace]
+members = [
+    "aisync-app",
+    "aisync-cli",
+    "aisync-core",
+    "aisync-discovery",
+    "aisync-session",
+    "aisync-sync",
+    "aisync-transport",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+version = "0.1.0"
+
+[workspace.dependencies]
+aisync-core = { path = "aisync-core" }
+aisync-transport = { path = "aisync-transport" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["serde", "v4"] }
+blake3 = "1"
+clap = { version = "4", features = ["derive"] }
+indicatif = "0.18"
+notify = "8"
+toml = "0.8"

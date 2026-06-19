@@ -1,0 +1,17 @@
+[package]
+name = "aisync-cli"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+aisync-core.workspace = true
+aisync-session = { path = "../aisync-session" }
+aisync-sync = { path = "../aisync-sync" }
+aisync-transport.workspace = true
+clap.workspace = true
+indicatif.workspace = true
+tokio = { version = "1", features = ["rt-multi-thread"] }
+
+[[bin]]
+name = "aisync"
+path = "src/main.rs"

@@ -1,0 +1,44 @@
+# Rust
+/target/
+**/*.rs.bk
+
+# macOS
+.DS_Store
+
+# Secrets / credentials
+*.env
+*.env.local
+
+# Claude skills & config (internal/private)
+.claude/
+
+# Team Agent (all)
+.team/
+
+# Wrangler (Cloudflare CLI cache)
+.wrangler/
+
+# Node
+node_modules/
+dist/
+
+# AISync local config
+.aisync/
+
+# Design source archives (large binaries)
+*.zip
+
+# Private / internal-only directories
+docs/
+frontend-demo/
+tools/
+Claude Design */
+
+# Product logo (private asset)
+codexbaton_mark_minimal_v2.svg
+
+# Test screenshots
+aisync-app/screenshots/
+
+# Thumbnails
+.thumbnail

@@ -1,0 +1,38 @@
+[package]
+name = "aisync-app"
+edition.workspace = true
+version.workspace = true
+description = "AISync desktop application (Tauri v2)"
+default-run = "aisync-app"
+
+[lib]
+name = "aisync_app_lib"
+path = "src/lib.rs"
+
+[[bin]]
+name = "aisync-app"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "=2.6.3", features = [] }
+
+[dependencies]
+aisync-core.workspace = true
+aisync-transport = { path = "../aisync-transport" }
+aisync-sync = { path = "../aisync-sync" }
+aisync-discovery = { path = "../aisync-discovery" }
+aisync-session = { path = "../aisync-session" }
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+blake3.workspace = true
+tokio = { version = "1", features = ["rt-multi-thread"] }
+tauri = { version = "=2.11.3", features = ["tray-icon", "image-png"] }
+tauri-plugin-notification = "=2.3.3"
+tauri-plugin-dialog = "2"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"
