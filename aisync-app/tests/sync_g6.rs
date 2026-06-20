@@ -75,6 +75,7 @@ fn make_config(root: &Path, local_code: &Path, remote_code: &Path) -> SyncConfig
             sync_mode: SyncModeConfig::OneWayPush,
             enabled: true,
             exclude_rules: Vec::new(),
+            sync_snapshots: std::collections::HashMap::new(),
         }],
         workspaces: Vec::new(),
         exclude_rules: aisync_sync::default_exclude_rules(),
@@ -103,7 +104,7 @@ fn run_sync_requires_remote_transport_and_does_not_write_local_remote_path() {
     let backend = Backend::with_config(config, root.join("config.toml")).unwrap();
 
     let error = backend
-        .run_sync("proj", "peer", Direction::LocalToRemote, &[])
+        .run_sync("proj", "peer", Direction::LocalToRemote, &[], false)
         .unwrap_err()
         .to_string();
 
@@ -139,7 +140,7 @@ fn run_sync_uses_configured_tcp_endpoint() {
 
     let backend = Backend::with_config(config, root.join("config.toml")).unwrap();
     let report = backend
-        .run_sync("proj", "peer", Direction::LocalToRemote, &[])
+        .run_sync("proj", "peer", Direction::LocalToRemote, &[], false)
         .unwrap();
 
     assert_eq!(report.code_files_transferred, 1);
@@ -479,7 +480,7 @@ fn gui_instance_pushes_to_peer_serve_daemon() {
 
     // A pushes to B over real TCP/TLS.
     let report = backend_a
-        .run_sync("myproj", "B", Direction::LocalToRemote, &[])
+        .run_sync("myproj", "B", Direction::LocalToRemote, &[], false)
         .expect("push to peer GUI should succeed");
     assert!(report.code_files_transferred >= 1);
     assert!(report.session_files_transferred >= 1);

@@ -19,10 +19,41 @@ export function ProjectCard({ project }: { project: Project }) {
     }
   };
 
-  const sync = (direction: "push" | "pull") => {
+  const startSyncNow = (direction: "push" | "pull", confirmOverwrite = false) => {
     setSelectedProjectId(project.id);
-    ipc.startSync(project.id, direction).catch(() => {});
+    ipc.startSync(project.id, direction, [], confirmOverwrite).catch(() => {});
     setDialog({ kind: "syncProgress" });
+  };
+
+  const sync = async (direction: "push" | "pull") => {
+    setSelectedProjectId(project.id);
+    // Pull is disabled in the UI; only push reaches here. Before pushing, probe
+    // the peer for split-brain / overwrite risk:
+    //   splitBrain               → ask which side wins (本端/对端/取消)
+    //   peerNotEmpty && !snapshot → confirm overwrite (peer originals backed up)
+    //   otherwise                → push directly
+    if (direction === "push") {
+      let probe;
+      try {
+        probe = await ipc.checkSplitBrain(project.id, project.peerName);
+      } catch (e) {
+        pushToast(`${t.overwriteCheckFailed}: ${e}`);
+        return;
+      }
+      if (!probe.reachable) {
+        pushToast(t.peerOfflineCantSync(project.peerName));
+        return;
+      }
+      if (probe.splitBrain) {
+        setDialog({ kind: "splitBrain", projectId: project.id, peerName: project.peerName });
+        return;
+      }
+      if (probe.peerNotEmpty && !probe.hasSnapshot) {
+        setDialog({ kind: "overwriteConfirm", projectId: project.id, peerName: project.peerName });
+        return;
+      }
+    }
+    startSyncNow(direction);
   };
 
   return (
@@ -67,7 +98,7 @@ export function ProjectCard({ project }: { project: Project }) {
               <button className="primary" onClick={() => sync("push")}>
                 {t.push}
               </button>
-              <button onClick={() => sync("pull")}>{t.pull}</button>
+              <button disabled title={t.pullDisabledHint}>{t.pull}</button>
             </>
           )}
         </div>
@@ -118,7 +149,7 @@ export function ProjectCard({ project }: { project: Project }) {
             <button className="cta" onClick={() => sync("push")}>
               {t.pushToHome} {project.peerName}
             </button>
-            <button onClick={() => sync("pull")}>
+            <button disabled title={t.pullDisabledHint}>
               {t.pullFromHome} {project.peerName}
             </button>
             <span style={{ flex: 1 }} />

@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 pub use config::{
     default_config_path, default_refresh_interval_secs, default_state_path, load_config,
     save_config, ClaudeConfig, ConfigStore, DeviceConfig, PeerConfig, ProjectConfig, SyncConfig,
-    SyncModeConfig, WorkspaceChildConfig, WorkspaceConfig,
+    SyncModeConfig, SyncSnapshot, WorkspaceChildConfig, WorkspaceConfig,
 };
 pub use watcher::{
     default_exclude_rules, expand_exclude_rules, ChangeBatch, FileChange, FileChangeKind,
@@ -793,6 +793,7 @@ mod tests {
             sync_mode: SyncModeConfig::TwoWayAuto,
             enabled: true,
             exclude_rules: vec!["dist/".into()],
+            sync_snapshots: HashMap::new(),
         });
         config.state_path = Some(root.join("state.toml"));
 
@@ -804,6 +805,40 @@ mod tests {
         let loaded = load_config(&path).unwrap();
         assert_eq!(loaded.device.name, "MacBook");
         assert_eq!(loaded.projects[0].exclude_rules, vec!["dist/"]);
+    }
+
+    #[test]
+    fn sync_snapshot_round_trips_through_config() {
+        let root = temp_dir("snapshot");
+        let local_project = root.join("app");
+        fs::create_dir_all(&local_project).unwrap();
+        let mut config = SyncConfig::new("MacBook");
+        config.projects.push(ProjectConfig {
+            name: "myapp".into(),
+            local: local_project,
+            peers: HashMap::from([("desktop".to_string(), root.join("remote"))]),
+            sync_mode: SyncModeConfig::TwoWayAuto,
+            enabled: true,
+            exclude_rules: Vec::new(),
+            sync_snapshots: HashMap::new(),
+        });
+
+        assert!(config.sync_snapshot("myapp", "desktop").is_none());
+        config.set_sync_snapshot(
+            "myapp",
+            "desktop",
+            SyncSnapshot {
+                peer_last_known_hash: "peerhash".into(),
+                self_last_synced_hash: "selfhash".into(),
+            },
+        );
+
+        let path = root.join("config.toml");
+        save_config(&path, &config).unwrap();
+        let loaded = load_config(&path).unwrap();
+        let snap = loaded.sync_snapshot("myapp", "desktop").unwrap();
+        assert_eq!(snap.peer_last_known_hash, "peerhash");
+        assert_eq!(snap.self_last_synced_hash, "selfhash");
     }
 
     #[test]

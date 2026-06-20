@@ -419,3 +419,17 @@ pub struct ServeInfoDto {
     pub cert_path: String,
     pub receive_dir: String,
 }
+
+/// 推送前脑裂/覆盖检测结果，供前端决定弹哪种确认框（覆盖确认 / 以哪端为准）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SplitBrainStatusDto {
+    /// 对端是否可达。false 时其余字段无意义，前端可提示「对端离线」。
+    pub reachable: bool,
+    /// 本端是否存有该 (项目, 对端) 的同步快照（即是否曾成功同步过）。
+    pub has_snapshot: bool,
+    /// 对端目标目录当前是否非空（初始覆盖场景判断用）。
+    pub peer_not_empty: bool,
+    /// 是否检测到脑裂（有快照且对端当前指纹与上次已知不一致）。
+    pub split_brain: bool,
+}

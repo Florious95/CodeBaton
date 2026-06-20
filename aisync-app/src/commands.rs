@@ -1411,6 +1411,43 @@ pub fn get_auto_sync_paused(backend: State<Backend>) -> bool {
     backend.auto_sync_paused()
 }
 
+// ── Overwrite safety: is the peer's target dir non-empty? ────────────
+//
+// Asks the peer (over the control channel) whether the project's remote target
+// directory already contains files. The UI calls this before a push and, if
+// true, shows an overwrite-confirm dialog before starting the sync.
+//
+// Placeholder: returns false until session implements the control-channel probe
+// in `backend`. Returning false means "empty" → push proceeds without prompting,
+// preserving today's behaviour until the real check lands.
+#[tauri::command]
+pub fn check_target_not_empty(
+    backend: State<Backend>,
+    project_id: String,
+    peer_name: String,
+) -> std::result::Result<bool, String> {
+    backend
+        .check_target_not_empty(&project_id, &peer_name)
+        .map_err(|e| e.to_string())
+}
+
+/// 推送前脑裂检测：返回前端弹窗所需的最小状态（不含文件级 diff）。
+/// 前端据此决定：split_brain=true → 弹「以哪端为准」；否则 peer_not_empty 走覆盖确认。
+#[tauri::command]
+pub fn check_split_brain(
+    backend: State<Backend>,
+    project_id: String,
+    peer_name: String,
+) -> std::result::Result<SplitBrainStatusDto, String> {
+    let status = backend.check_split_brain(&project_id, &peer_name);
+    Ok(SplitBrainStatusDto {
+        reachable: status.reachable,
+        has_snapshot: status.has_snapshot,
+        peer_not_empty: status.peer_not_empty,
+        split_brain: status.split_brain,
+    })
+}
+
 // ── Sync (push / pull) — real SyncCoordinator on a worker thread ─────
 
 #[tauri::command]
@@ -1419,6 +1456,7 @@ pub fn start_sync(
     project_id: String,
     direction: String,
     confirmed_sensitive: Option<Vec<String>>,
+    confirm_overwrite: Option<bool>,
 ) -> std::result::Result<(), String> {
     let dir = if direction == "pull" {
         Direction::RemoteToLocal
@@ -1426,6 +1464,11 @@ pub fn start_sync(
         Direction::LocalToRemote
     };
     let confirmed = confirmed_sensitive.unwrap_or_default();
+    // Overwrite confirmation: when the UI detected a non-empty peer target and the
+    // user chose to proceed, this is true. Threaded into commit_staging so the
+    // peer's original target dir is fully backed up to a `<name>.bak-<timestamp>`
+    // sibling (kept, not deleted) before the incremental merge.
+    let confirm_overwrite = confirm_overwrite.unwrap_or(false);
 
     // Resolve a peer name from config for this project, if any.
     let config = app.state::<Backend>().config();
@@ -1451,7 +1494,7 @@ pub fn start_sync(
     let display = (project_id.clone(), peer_name.clone().unwrap_or_default());
 
     spawn_sync(
-        app, project_id, peer_name, dir, confirmed, display.0, display.1,
+        app, project_id, peer_name, dir, confirmed, display.0, display.1, confirm_overwrite,
     );
     Ok(())
 }
@@ -1466,6 +1509,7 @@ fn spawn_sync(
     confirmed_sensitive: Vec<String>,
     project_name: String,
     peer_display: String,
+    confirm_overwrite: bool,
 ) {
     let dir_label = if matches!(direction, Direction::RemoteToLocal) {
         format!("{} ← {}", project_name, peer_display)
@@ -1534,7 +1578,13 @@ fn spawn_sync(
                     .any(|project| project.name == project_id)
                 {
                     backend
-                        .run_sync(&project_id, peer, direction, &confirmed_sensitive)
+                        .run_sync(
+                            &project_id,
+                            peer,
+                            direction,
+                            &confirmed_sensitive,
+                            confirm_overwrite,
+                        )
                         .map_err(|e| e.to_string())
                 } else {
                     let workspace_name = backend

@@ -154,8 +154,31 @@ export const ipc = {
     call<void>("set_auto_sync_paused", { paused }),
   getAutoSyncPaused: () => call<boolean>("get_auto_sync_paused"),
 
-  startSync: (projectId: string, direction: string, confirmedSensitive?: string[]) =>
-    call<void>("start_sync", { projectId, direction, confirmedSensitive: confirmedSensitive ?? [] }),
+  checkTargetNotEmpty: (projectId: string, peerName: string) =>
+    call<boolean>("check_target_not_empty", { projectId, peerName }),
+
+  // 推送前脑裂检测。split_brain=true → 前端弹「以哪端为准」；否则若 peerNotEmpty
+  // 且无快照 → 走覆盖确认；reachable=false → 对端离线提示。
+  checkSplitBrain: (projectId: string, peerName: string) =>
+    call<{
+      reachable: boolean;
+      hasSnapshot: boolean;
+      peerNotEmpty: boolean;
+      splitBrain: boolean;
+    }>("check_split_brain", { projectId, peerName }),
+
+  startSync: (
+    projectId: string,
+    direction: string,
+    confirmedSensitive?: string[],
+    confirmOverwrite?: boolean,
+  ) =>
+    call<void>("start_sync", {
+      projectId,
+      direction,
+      confirmedSensitive: confirmedSensitive ?? [],
+      confirmOverwrite: confirmOverwrite ?? false,
+    }),
   cancelSync: (projectId: string) => call<void>("cancel_sync", { projectId }),
 
   addProject: (project: unknown) => call<void>("add_project", { project }),

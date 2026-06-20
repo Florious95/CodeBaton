@@ -139,6 +139,8 @@ pub enum MessageType {
     FileTransferRequest = 17,
     FileTransferData = 18,
     FileTransferAck = 19,
+    TargetStatusRequest = 20,
+    TargetStatusResponse = 21,
     Error = 255,
 }
 
@@ -166,6 +168,8 @@ impl TryFrom<u8> for MessageType {
             17 => Ok(Self::FileTransferRequest),
             18 => Ok(Self::FileTransferData),
             19 => Ok(Self::FileTransferAck),
+            20 => Ok(Self::TargetStatusRequest),
+            21 => Ok(Self::TargetStatusResponse),
             255 => Ok(Self::Error),
             other => Err(transport_err(format!("unknown message type {other}"))),
         }
@@ -202,6 +206,28 @@ pub struct ProjectMappingAckPayload {
     pub project_name: String,
     pub remote_dir: Option<PathBuf>,
     pub message: Option<String>,
+    pub device: DeviceInfo,
+}
+
+/// 推送前查询对端目标目录状态（脑裂/覆盖检测）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TargetStatusRequestPayload {
+    pub request_id: String,
+    /// 对端上要查询的目标目录（本次推送的 remote_code_dir）。
+    pub target_dir: PathBuf,
+    pub device: DeviceInfo,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TargetStatusResponsePayload {
+    pub request_id: String,
+    /// 目标目录是否存在且含至少一个文件（排除 .aisync-* 内部目录）。
+    pub not_empty: bool,
+    /// 目标目录文件数（不含内部目录），供 UI 展示。
+    pub file_count: u64,
+    /// 目标目录当前 manifest 指纹（脑裂检测）；空目录为对应空 hash。
+    #[serde(default)]
+    pub manifest_hash: String,
     pub device: DeviceInfo,
 }
 
@@ -278,6 +304,9 @@ pub enum Message {
         manifest: SyncManifest,
         #[serde(default)]
         remote_dir: Option<PathBuf>,
+        /// 推送端请求对端提交前完整备份目标目录（用户已确认覆盖）。旧版无此字段，默认 false。
+        #[serde(default)]
+        confirm_overwrite: bool,
     },
     FileSignatures {
         signatures: Vec<SignatureEntry>,
@@ -342,6 +371,12 @@ pub enum Message {
     FileTransferAck {
         ack: FileTransferAckPayload,
     },
+    TargetStatusRequest {
+        request: TargetStatusRequestPayload,
+    },
+    TargetStatusResponse {
+        response: TargetStatusResponsePayload,
+    },
     Error {
         message: String,
     },
@@ -369,6 +404,8 @@ impl Message {
             Self::FileTransferRequest { .. } => MessageType::FileTransferRequest,
             Self::FileTransferData { .. } => MessageType::FileTransferData,
             Self::FileTransferAck { .. } => MessageType::FileTransferAck,
+            Self::TargetStatusRequest { .. } => MessageType::TargetStatusRequest,
+            Self::TargetStatusResponse { .. } => MessageType::TargetStatusResponse,
             Self::Error { .. } => MessageType::Error,
         }
     }
@@ -422,6 +459,9 @@ pub type FileTransferDataCallback<'a> =
 
 pub struct TcpTransporter {
     stream: tokio_rustls::client::TlsStream<TcpStream>,
+    /// 推送时若为 true，请求对端在提交前对目标目录做完整备份（用户已确认覆盖）。
+    /// 随 FileManifest 发往对端；默认 false。
+    confirm_overwrite: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -470,7 +510,65 @@ impl TcpTransporter {
             format!("peer={addr} elapsed_ms={}", started.elapsed().as_millis()),
         );
 
-        Ok(Self { stream })
+        Ok(Self {
+            stream,
+            confirm_overwrite: false,
+        })
+    }
+
+    /// 标记本次推送已获用户覆盖确认：对端提交前会对目标目录做完整备份。链式调用。
+    pub fn with_confirm_overwrite(mut self, confirm: bool) -> Self {
+        self.confirm_overwrite = confirm;
+        self
+    }
+
+    /// 优雅关闭：发送 TLS close_notify 再断。rustls 在 drop 时**不会**自动发，
+    /// 不显式 shutdown 会让对端下次读到「peer closed without close_notify」(UnexpectedEof)。
+    /// 一次会话结束后应调用本方法。尽力而为，错误忽略。
+    pub async fn shutdown(&mut self) {
+        let _ = tokio::time::timeout(FRAME_HEADER_TIMEOUT, self.stream.shutdown()).await;
+    }
+
+    /// 连到对端、查询其目标目录状态（是否非空 + manifest 指纹）。
+    /// 复用 ProjectMapping 的请求/响应控制帧模式：Hello 握手 -> 写请求 -> 读响应。
+    pub async fn send_target_status_request(
+        &mut self,
+        request: TargetStatusRequestPayload,
+    ) -> Result<TargetStatusResponsePayload> {
+        let request_id = request.request_id.clone();
+        write_message(
+            &mut self.stream,
+            &Message::Hello {
+                protocol_version: PROTOCOL_VERSION,
+                device_name: request.device.name.clone(),
+            },
+        )
+        .await?;
+        expect_hello(read_message(&mut self.stream).await?)?;
+
+        trace_stage("target_status_request_write", format!("request_id={request_id}"));
+        write_message(&mut self.stream, &Message::TargetStatusRequest { request }).await?;
+        match read_message(&mut self.stream).await? {
+            Message::TargetStatusResponse { response } if response.request_id == request_id => {
+                trace_stage(
+                    "target_status_response",
+                    format!(
+                        "request_id={request_id} not_empty={} files={}",
+                        response.not_empty, response.file_count
+                    ),
+                );
+                Ok(response)
+            }
+            Message::TargetStatusResponse { response } => Err(transport_err(format!(
+                "target status response mismatch: expected {request_id}, got {}",
+                response.request_id
+            ))),
+            Message::Error { message } => Err(transport_err(message)),
+            other => Err(transport_err(format!(
+                "expected TargetStatusResponse, got {:?}",
+                other.message_type()
+            ))),
+        }
     }
 
     pub async fn connect_to_peer(peer: &DeviceInfo, port: u16, tls: &TlsConfig) -> Result<Self> {
@@ -1281,6 +1379,7 @@ impl TcpTransporter {
             &Message::FileManifest {
                 manifest: source_manifest.clone(),
                 remote_dir: remote_dir.map(Path::to_path_buf),
+                confirm_overwrite: self.confirm_overwrite,
             },
         )
         .await?;
@@ -1564,6 +1663,40 @@ impl TransportServer {
             .await?;
             return Ok(SyncManifest { files: Vec::new() });
         }
+        if let Message::TargetStatusRequest { request } = message {
+            let request_id = request.request_id.clone();
+            // 纯本地查询：数对端目标目录文件 + 算 manifest 指纹，无需外部回调。
+            let file_count = count_target_files(&request.target_dir);
+            let target_hash = scan_manifest(&request.target_dir)
+                .map(|m| manifest_hash(&m))
+                .unwrap_or_default();
+            trace_stage(
+                "target_status_request_received",
+                format!(
+                    "role=server peer={peer_addr} request_id={} target_dir={} file_count={} manifest_hash={}",
+                    request_id,
+                    request.target_dir.display(),
+                    file_count,
+                    target_hash
+                ),
+            );
+            write_message(
+                &mut stream,
+                &Message::TargetStatusResponse {
+                    response: TargetStatusResponsePayload {
+                        request_id,
+                        not_empty: file_count > 0,
+                        file_count,
+                        manifest_hash: target_hash,
+                        device: server_device_info(),
+                    },
+                },
+            )
+            .await?;
+            // 发 close_notify 再断，避免对端读到 UnexpectedEof。
+            let _ = tokio::time::timeout(FRAME_HEADER_TIMEOUT, stream.shutdown()).await;
+            return Ok(SyncManifest { files: Vec::new() });
+        }
         if let Message::ProjectMappingAck { ack } = message {
             let request_id = ack.request_id.clone();
             trace_stage(
@@ -1777,11 +1910,12 @@ impl TransportServer {
             return Ok(SyncManifest { files: Vec::new() });
         }
 
-        let (source_manifest, remote_dir) = match message {
+        let (source_manifest, remote_dir, confirm_overwrite) = match message {
             Message::FileManifest {
                 manifest,
                 remote_dir,
-            } => (manifest, remote_dir),
+                confirm_overwrite,
+            } => (manifest, remote_dir, confirm_overwrite),
             Message::Error { message } => return Err(transport_err(message)),
             other => {
                 let error = format!("expected FileManifest, got {:?}", other.message_type());
@@ -1856,6 +1990,8 @@ impl TransportServer {
             &Message::FileManifest {
                 manifest: target_manifest.clone(),
                 remote_dir: None,
+                // 服务端回给客户端的目标清单，与覆盖确认无关。
+                confirm_overwrite: false,
             },
         )
         .await?;
@@ -1906,9 +2042,15 @@ impl TransportServer {
                 let started = Instant::now();
                 trace_stage(
                     "commit_start",
-                    format!("role=server target={}", target_dir.display()),
+                    format!(
+                        "role=server target={} confirm_overwrite={}",
+                        target_dir.display(),
+                        confirm_overwrite
+                    ),
                 );
-                commit_staging(&staging, &target_dir)?;
+                // commit 在发 SyncComplete 之前：必须先落盘成功（含 50% 安全阀判定）才能
+                // 告诉客户端成功；否则安全阀中止/磁盘错误时客户端会误存快照。
+                commit_staging_with_options(&staging, &target_dir, confirm_overwrite)?;
                 let committed = scan_manifest(&target_dir)?;
                 trace_stage(
                     "commit_done",
@@ -1924,6 +2066,9 @@ impl TransportServer {
                     format!("role=server peer={peer_addr}"),
                 );
                 write_message(&mut stream, &Message::SyncComplete).await?;
+                // 关键修复：发 close_notify 再断。tokio_rustls drop 不自动发，
+                // 否则客户端读 SyncComplete 后续会得到「without close_notify」(UnexpectedEof)。
+                let _ = tokio::time::timeout(FRAME_HEADER_TIMEOUT, stream.shutdown()).await;
                 trace_stage(
                     "sync_complete_write_done",
                     format!(
@@ -1942,6 +2087,7 @@ impl TransportServer {
                     },
                 )
                 .await;
+                let _ = tokio::time::timeout(FRAME_HEADER_TIMEOUT, stream.shutdown()).await;
                 Err(error)
             }
         }
@@ -3008,6 +3154,8 @@ fn default_exclude_patterns() -> Vec<&'static str> {
         "**/target/**",
         "__pycache__/**",
         "**/__pycache__/**",
+        ".aisync-trash/**",
+        "**/.aisync-trash/**",
     ]
 }
 
@@ -3122,40 +3270,184 @@ fn home_dir() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-fn commit_staging(staging: &Path, target_dir: &Path) -> Result<()> {
-    let parent = target_dir.parent().unwrap_or_else(|| Path::new("."));
-    let backup = parent.join(format!(
-        ".aisync-backup-{}",
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_else(|_| Duration::from_secs(0))
-            .as_nanos()
-    ));
+/// 计算 manifest 的稳定指纹：对 (相对路径, 内容 blake3) 按路径排序后逐项哈希。
+/// 与文件顺序无关，两端对同一目录内容算出的值一致——用作脑裂检测的快照 hash。
+pub fn manifest_hash(manifest: &SyncManifest) -> String {
+    let mut entries: Vec<&FileEntry> = manifest.files.iter().collect();
+    entries.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
+    let mut hasher = blake3::Hasher::new();
+    for entry in entries {
+        hasher.update(entry.relative_path.as_bytes());
+        hasher.update(b"\0");
+        hasher.update(entry.blake3_hash.as_bytes());
+        hasher.update(b"\n");
+    }
+    hasher.finalize().to_hex().to_string()
+}
 
-    if target_dir.exists() {
-        fs::rename(target_dir, &backup)?;
+/// 列出目录下所有文件的相对路径（不含目录、不含 .aisync-trash 内部目录）。
+fn list_relative_files(root: &Path) -> Result<HashSet<PathBuf>> {
+    let mut files = HashSet::new();
+    if !root.exists() {
+        return Ok(files);
+    }
+    for entry in WalkDir::new(root).follow_links(false) {
+        let entry = entry.map_err(|error| transport_err(error.to_string()))?;
+        let relative = entry
+            .path()
+            .strip_prefix(root)
+            .map_err(|error| transport_err(error.to_string()))?;
+        // 回收站不参与合并/删除/安全阀/计数。
+        if relative.starts_with(".aisync-trash") {
+            continue;
+        }
+        if entry.file_type().is_file() {
+            files.insert(relative.to_path_buf());
+        }
+    }
+    Ok(files)
+}
+
+/// 数目标目录中的文件数（不含目录、不含 .aisync-* 内部目录）。用于推送前覆盖检测。
+/// 目录不存在或读取失败时返回 0（视为空，不阻断推送）。
+pub fn count_target_files(target_dir: &Path) -> u64 {
+    list_relative_files(target_dir)
+        .map(|files| files.len() as u64)
+        .unwrap_or(0)
+}
+
+/// 增量合并提交（默认：50% 安全阀 + .aisync-trash 回收站）。仅测试用薄封装。
+#[cfg(test)]
+fn commit_staging(staging: &Path, target_dir: &Path) -> Result<()> {
+    commit_staging_with_options(staging, target_dir, false)
+}
+
+/// 增量合并提交：只覆盖 staging 中存在的文件，删除 target 中 staging 不再包含的文件。
+///
+/// 绝不整目录 rename 替换——staging 是基于 target 完整快照增量修改而来，target 有、
+/// staging 无的文件才是「真删除」。
+///
+/// `confirm_overwrite=true`（用户已确认覆盖）：合并前把整个 target 完整快照到同级
+/// `<name>.bak-<时间戳>` 永久保留，并放行安全阀（有完整备份兜底，大比例删除也可逆）。
+/// `confirm_overwrite=false`（默认）：删除量 >50% 时中止；真删除文件移入回收站。
+fn commit_staging_with_options(
+    staging: &Path,
+    target_dir: &Path,
+    confirm_overwrite: bool,
+) -> Result<()> {
+    let staging_files = list_relative_files(staging)?;
+    let target_files = list_relative_files(target_dir)?;
+    let to_delete: Vec<&PathBuf> = target_files.difference(&staging_files).collect();
+
+    if confirm_overwrite {
+        backup_target_dir(target_dir)?;
+    } else if !target_files.is_empty() {
+        let delete_ratio = to_delete.len() as f64 / target_files.len() as f64;
+        if delete_ratio > 0.5 {
+            return Err(transport_err(format!(
+                "commit aborted by safety valve: would delete {} of {} files ({:.0}%) in {}; staging may be incomplete (staging has {} files). Re-run with overwrite confirmation to proceed with a full backup.",
+                to_delete.len(),
+                target_files.len(),
+                delete_ratio * 100.0,
+                target_dir.display(),
+                staging_files.len()
+            )));
+        }
     }
 
-    match fs::rename(staging, target_dir) {
-        Ok(()) => {
-            if backup.exists() {
-                fs::remove_dir_all(backup)?;
-            }
-            Ok(())
+    fs::create_dir_all(target_dir)?;
+
+    // 1. 覆盖/新增：staging 中每个文件原子写入 target。
+    for relative in &staging_files {
+        let source = staging.join(relative);
+        let destination = target_dir.join(relative);
+        let data = fs::read(&source)?;
+        write_file_atomic(&destination, &data)?;
+    }
+
+    // 2. 删除：staging 中已不存在的 target 文件移入回收站，而非物理删除。
+    for relative in to_delete {
+        let victim = target_dir.join(relative);
+        trash_file(target_dir, relative, &victim)?;
+        remove_empty_parents(target_dir, victim.parent());
+    }
+
+    if staging.exists() {
+        let _ = fs::remove_dir_all(staging);
+    }
+    Ok(())
+}
+
+/// 把整个 target 完整快照到同级 `<name>.bak-<时间戳>`（copy，不 move），永久保留。
+/// target 不存在或为空则跳过。
+fn backup_target_dir(target_dir: &Path) -> Result<()> {
+    if !target_dir.exists() {
+        return Ok(());
+    }
+    if list_relative_files(target_dir)?.is_empty() {
+        return Ok(());
+    }
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_else(|_| Duration::from_secs(0))
+        .as_secs();
+    let name = target_dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("target");
+    let parent = target_dir.parent().unwrap_or_else(|| Path::new("."));
+    let backup = parent.join(format!("{name}.bak-{stamp}"));
+    fs::create_dir_all(&backup)?;
+    copy_dir_contents(target_dir, &backup)?;
+    trace_stage(
+        "target_backup_created",
+        format!("target={} backup={}", target_dir.display(), backup.display()),
+    );
+    Ok(())
+}
+
+/// 删除前把文件移入 `<target_dir>/.aisync-trash/<时间戳>/<relative>` 回收站，保留 7 天。
+fn trash_file(target_dir: &Path, relative: &Path, victim: &Path) -> Result<()> {
+    if !victim.exists() {
+        return Ok(());
+    }
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_else(|_| Duration::from_secs(0))
+        .as_secs();
+    let trash_root = target_dir.join(".aisync-trash").join(stamp.to_string());
+    let grave = trash_root.join(relative);
+    if let Some(parent) = grave.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    match fs::rename(victim, &grave) {
+        Ok(()) => {}
+        Err(_) => {
+            fs::copy(victim, &grave)?;
+            fs::remove_file(victim)?;
         }
-        Err(error) => {
-            if backup.exists() {
-                if let Err(restore_error) = fs::rename(&backup, target_dir) {
-                    eprintln!(
-                        "[aisync-transport] failed to restore backup after commit error: backup={} target={} commit_error={} restore_error={}",
-                        backup.display(),
-                        target_dir.display(),
-                        error,
-                        restore_error
-                    );
-                }
-            }
-            Err(error.into())
+    }
+    purge_expired_trash(target_dir);
+    Ok(())
+}
+
+/// 清理 `.aisync-trash/` 下早于 7 天的批次目录。尽力而为，失败不影响主流程。
+fn purge_expired_trash(target_dir: &Path) {
+    const RETENTION_SECS: u64 = 7 * 24 * 60 * 60;
+    let trash_root = target_dir.join(".aisync-trash");
+    let Ok(entries) = fs::read_dir(&trash_root) else {
+        return;
+    };
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    for entry in entries.flatten() {
+        let Some(name) = entry.file_name().to_str().and_then(|s| s.parse::<u64>().ok()) else {
+            continue;
+        };
+        if now.saturating_sub(name) > RETENTION_SECS {
+            let _ = fs::remove_dir_all(entry.path());
         }
     }
 }
@@ -3557,17 +3849,120 @@ mod tests {
     }
 
     #[test]
-    fn commit_replaces_target_only_after_success() {
+    fn commit_merges_incrementally_without_clobbering_unchanged() {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("target");
         let staging = dir.path().join(".aisync-staging-test");
-        write(&target.join("old.txt"), b"old");
-        write(&staging.join("new.txt"), b"new");
+        write(&target.join("keep.txt"), b"keep");
+        write(&target.join("mod.txt"), b"old");
+        write(&staging.join("keep.txt"), b"keep");
+        write(&staging.join("mod.txt"), b"new");
+        write(&staging.join("new.txt"), b"added");
 
         commit_staging(&staging, &target).unwrap();
 
-        assert!(!target.join("old.txt").exists());
-        assert_eq!(fs::read(target.join("new.txt")).unwrap(), b"new");
+        assert_eq!(fs::read(target.join("keep.txt")).unwrap(), b"keep");
+        assert_eq!(fs::read(target.join("mod.txt")).unwrap(), b"new");
+        assert_eq!(fs::read(target.join("new.txt")).unwrap(), b"added");
+        assert!(!staging.exists());
+    }
+
+    #[test]
+    fn commit_safety_valve_aborts_on_mass_deletion() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target");
+        let staging = dir.path().join(".aisync-staging-test");
+        for name in ["a.txt", "b.txt", "c.txt", "d.txt"] {
+            write(&target.join(name), b"data");
+        }
+        write(&staging.join("a.txt"), b"data");
+
+        assert!(commit_staging(&staging, &target).is_err());
+        for name in ["a.txt", "b.txt", "c.txt", "d.txt"] {
+            assert!(target.join(name).exists(), "{name} must survive");
+        }
+    }
+
+    #[test]
+    fn commit_moves_deleted_files_to_trash() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target");
+        let staging = dir.path().join(".aisync-staging-test");
+        for name in ["a.txt", "b.txt", "c.txt"] {
+            write(&target.join(name), b"data");
+            write(&staging.join(name), b"data");
+        }
+        fs::remove_file(staging.join("c.txt")).unwrap();
+
+        commit_staging(&staging, &target).unwrap();
+
+        assert!(!target.join("c.txt").exists());
+        assert!(target.join("a.txt").exists());
+        let found = WalkDir::new(target.join(".aisync-trash"))
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .any(|e| e.file_name() == "c.txt");
+        assert!(found, "deleted file must land in .aisync-trash");
+    }
+
+    #[test]
+    fn confirm_overwrite_backs_up_target_and_bypasses_safety_valve() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target");
+        let staging = dir.path().join(".aisync-staging-test");
+        for name in ["a.txt", "b.txt", "c.txt", "d.txt"] {
+            write(&target.join(name), b"orig");
+        }
+        write(&staging.join("a.txt"), b"new");
+
+        commit_staging_with_options(&staging, &target, true).unwrap();
+
+        assert_eq!(fs::read(target.join("a.txt")).unwrap(), b"new");
+        assert!(!target.join("d.txt").exists());
+        let backup = fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .find(|e| e.file_name().to_string_lossy().starts_with("target.bak-"))
+            .expect("backup dir must exist");
+        for name in ["a.txt", "b.txt", "c.txt", "d.txt"] {
+            assert_eq!(fs::read(backup.path().join(name)).unwrap(), b"orig");
+        }
+    }
+
+    #[test]
+    fn count_target_files_excludes_internal_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("t");
+        write(&target.join("a.txt"), b"1");
+        write(&target.join("sub/b.txt"), b"2");
+        write(&target.join(".aisync-trash/123/old.txt"), b"x");
+        assert_eq!(count_target_files(&target), 2);
+        assert_eq!(count_target_files(&dir.path().join("missing")), 0);
+    }
+
+    #[test]
+    fn manifest_hash_is_order_independent_and_content_sensitive() {
+        let entry = |p: &str, h: &str| FileEntry {
+            relative_path: p.to_string(),
+            size: 1,
+            blake3_hash: h.to_string(),
+            mtime: 0,
+        };
+        let a = SyncManifest {
+            files: vec![entry("x.txt", "h1"), entry("y.txt", "h2")],
+        };
+        let b = SyncManifest {
+            files: vec![entry("y.txt", "h2"), entry("x.txt", "h1")],
+        };
+        assert_eq!(manifest_hash(&a), manifest_hash(&b));
+        let c = SyncManifest {
+            files: vec![entry("x.txt", "CHANGED"), entry("y.txt", "h2")],
+        };
+        assert_ne!(manifest_hash(&a), manifest_hash(&c));
+        assert_eq!(
+            manifest_hash(&SyncManifest { files: vec![] }),
+            manifest_hash(&SyncManifest { files: vec![] })
+        );
     }
 
     #[test]
@@ -3676,6 +4071,95 @@ mod tests {
             );
             assert!(!target.path().join("stale.txt").exists());
             assert_eq!(fs::read(target.path().join(".env")).unwrap(), b"KEEP=1");
+        });
+    }
+
+    #[test]
+    fn tls_target_status_probe_returns_state_and_closes_cleanly() {
+        // 回归（TLS bug）：推送后探测连接曾因接收端不发 close_notify 失败。
+        // 这里先 push（单连接），再探测（单连接），各自一个 server 任务处理一个连接，
+        // 避免阻塞式 accept 循环在同一 runtime 内与客户端互相饿死（生产环境 accept
+        // 跑在专用守护线程，无此约束）。验证探测返回正确状态 + 指纹且不挂死。
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(4)
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let source = tempfile::tempdir().unwrap();
+            let target = tempfile::tempdir().unwrap();
+            write(&source.path().join("a.txt"), b"hello");
+
+            let server_identity = generate_tls_identity("localhost").unwrap();
+            let server_tls = TlsConfig::new(server_identity.clone(), "localhost");
+            let client_identity = generate_tls_identity("localhost").unwrap();
+            let client_tls = TlsConfig::new(client_identity, "localhost")
+                .with_pinned_peer_cert(server_identity.cert_der.clone());
+
+            let service =
+                ReceiveService::bind("127.0.0.1:0".parse().unwrap(), target.path(), &server_tls)
+                    .await
+                    .unwrap();
+            let addr = service.local_addr().unwrap();
+            let target_path = target.path().to_path_buf();
+            let peer = DeviceInfo {
+                id: aisync_core::DeviceId::new(),
+                name: "receiver".to_string(),
+                os: aisync_core::OsType::Darwin,
+                addresses: vec![addr.ip()],
+                protocol_version: PROTOCOL_VERSION,
+            };
+
+            // ── 第一段：单连接推送，使目标目录非空 ──
+            let server_push = tokio::spawn(async move {
+                service.receive_once(None).await.unwrap();
+                service
+            });
+            let mut c1 = TcpTransporter::connect_to_peer(&peer, addr.port(), &client_tls)
+                .await
+                .unwrap();
+            tokio::time::timeout(
+                Duration::from_secs(20),
+                c1.sync_directory_to(source.path(), Some(&target_path), None),
+            )
+            .await
+            .expect("push must not hang waiting for SyncComplete")
+            .unwrap();
+            c1.shutdown().await;
+            let service = server_push.await.unwrap();
+
+            // ── 第二段：单连接探测，验证状态 + 指纹 ──
+            let server_probe = tokio::spawn(async move {
+                service
+                    .receive_once_with_control_handlers(
+                        None, None, None, None, None, None, None, None, None, None,
+                    )
+                    .await
+                    .unwrap();
+            });
+            let mut c2 = TcpTransporter::connect_to_peer(&peer, addr.port(), &client_tls)
+                .await
+                .unwrap();
+            let status = tokio::time::timeout(
+                Duration::from_secs(20),
+                c2.send_target_status_request(TargetStatusRequestPayload {
+                    request_id: "req-probe".to_string(),
+                    target_dir: target_path.clone(),
+                    device: peer.clone(),
+                }),
+            )
+            .await
+            .expect("probe must not hang (close_notify regression)")
+            .unwrap();
+            c2.shutdown().await;
+            tokio::time::timeout(Duration::from_secs(5), server_probe)
+                .await
+                .expect("probe server must finish")
+                .unwrap();
+
+            assert!(status.not_empty, "target non-empty after push");
+            assert!(!status.manifest_hash.is_empty());
+            assert_eq!(fs::read(target_path.join("a.txt")).unwrap(), b"hello");
         });
     }
 

@@ -909,6 +909,109 @@ function UnpairDialog({ peerId }: { peerId: string }) {
   );
 }
 
+// ── Overwrite confirm (push into a non-empty target) ─────────────────
+function OverwriteConfirmDialog({
+  projectId,
+  peerName,
+}: {
+  projectId: string;
+  peerName: string;
+}) {
+  const { setDialog, setSelectedProjectId, t } = useStore();
+  return (
+    <Dialog
+      title={t.overwriteConfirmTitle}
+      icon={<ShieldAlert size={18} color="var(--red)" />}
+      width={460}
+      closeOnOverlay={false}
+      onClose={() => {
+        ipc.uiLog("overwrite_confirmed action=cancel");
+        setDialog(null);
+      }}
+      footer={
+        <>
+          <button
+            onClick={() => {
+              ipc.uiLog("overwrite_confirmed action=cancel");
+              setDialog(null);
+            }}
+          >
+            {t.cancel}
+          </button>
+          <button
+            className="danger"
+            onClick={() => {
+              ipc.uiLog("overwrite_confirmed action=proceed");
+              setSelectedProjectId(projectId);
+              ipc.startSync(projectId, "push", [], true).catch(() => {});
+              setDialog({ kind: "syncProgress" });
+            }}
+          >
+            {t.overwriteConfirmProceed}
+          </button>
+        </>
+      }
+    >
+      <p style={{ lineHeight: 1.8 }}>{t.overwriteConfirmBody(peerName)}</p>
+    </Dialog>
+  );
+}
+
+// ── Split-brain (both sides changed) — which side wins? ──────────────
+function SplitBrainDialog({
+  projectId,
+  peerName,
+}: {
+  projectId: string;
+  peerName: string;
+}) {
+  const { setDialog, setSelectedProjectId, t } = useStore();
+  const cancel = () => {
+    ipc.uiLog("split_brain_resolved action=cancel");
+    setDialog(null);
+  };
+  return (
+    <Dialog
+      title={t.splitBrainTitle}
+      icon={<AlertTriangle size={18} color="var(--red)" />}
+      width={480}
+      closeOnOverlay={false}
+      onClose={cancel}
+      footer={
+        <>
+          <button onClick={cancel}>{t.cancel}</button>
+          <button
+            onClick={() => {
+              // Keep the peer = pull, which isn't implemented yet. Guide the
+              // user to push from the peer instead, and don't sync here.
+              ipc.uiLog("split_brain_resolved action=keep_remote");
+              pushToast(t.splitBrainKeepRemoteHint(peerName));
+              setDialog(null);
+            }}
+          >
+            {t.splitBrainKeepRemote}
+          </button>
+          <button
+            className="danger"
+            onClick={() => {
+              // Keep this device = normal push, overwriting the peer (its
+              // originals are backed up by the backend).
+              ipc.uiLog("split_brain_resolved action=keep_local");
+              setSelectedProjectId(projectId);
+              ipc.startSync(projectId, "push", [], true).catch(() => {});
+              setDialog({ kind: "syncProgress" });
+            }}
+          >
+            {t.splitBrainKeepLocal}
+          </button>
+        </>
+      }
+    >
+      <p style={{ lineHeight: 1.8 }}>{t.splitBrainBody(peerName)}</p>
+    </Dialog>
+  );
+}
+
 // ── D9: Sync progress + result view ──────────────────────────────────
 function SyncProgressDialog() {
   const { setDialog, syncProgress, lastResult, clearResult, t } = useStore();
@@ -1264,6 +1367,10 @@ export function DialogHost() {
       return <ExcludeRulesDialog projectId={dialog.projectId} />;
     case "unpair":
       return <UnpairDialog peerId={dialog.peerId} />;
+    case "overwriteConfirm":
+      return <OverwriteConfirmDialog projectId={dialog.projectId} peerName={dialog.peerName} />;
+    case "splitBrain":
+      return <SplitBrainDialog projectId={dialog.projectId} peerName={dialog.peerName} />;
     case "syncProgress":
       return <SyncProgressDialog />;
     case "rewriteReport":

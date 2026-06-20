@@ -35,8 +35,8 @@ use aisync_transport::{
     generate_tls_identity, match_sensitive_file_path, scan_sensitive_files, FileTransferAckPayload,
     FileTransferDataPayload, FileTransferRequestPayload, PairingRequestPayload,
     ProjectMappingAckPayload, ProjectMappingRequestPayload, ReceiveService, SensitiveFile,
-    TcpTransporter, TextMessagePayload, TlsConfig, TlsIdentity, WorkspaceMappingAckPayload,
-    WorkspaceMappingRequestPayload,
+    TargetStatusRequestPayload, TcpTransporter, TextMessagePayload, TlsConfig, TlsIdentity,
+    WorkspaceMappingAckPayload, WorkspaceMappingRequestPayload,
 };
 
 const AUTO_SYNC_COOLDOWN: Duration = Duration::from_secs(90);
@@ -2594,6 +2594,7 @@ impl Backend {
         peer_name: &str,
         direction: Direction,
         confirmed_sensitive: &[String],
+        confirm_overwrite: bool,
     ) -> Result<SyncReport> {
         let mut g = self.inner.lock().unwrap();
         let project = g.config.project_mapping(project_name, peer_name)?;
@@ -2636,6 +2637,7 @@ impl Backend {
                 peer_name,
                 &project,
                 live_connection,
+                confirm_overwrite,
             ),
             Direction::RemoteToLocal => Err(AisyncError::Transport(
                 "pull over TCP requires a remote control channel; start a local receiver and run send on the peer".to_string(),
@@ -2672,6 +2674,151 @@ impl Backend {
         }
         result
     }
+
+    /// 连到对端、查询本项目 remote_code_dir 的状态（是否非空 + 当前 manifest 指纹）。
+    /// 一次往返同时服务覆盖检测与脑裂检测。对端离线/连接失败时返回 Err。
+    fn probe_target_status(
+        &self,
+        project_name: &str,
+        peer_name: &str,
+    ) -> Result<aisync_transport::TargetStatusResponsePayload> {
+        let g = self.inner.lock().unwrap();
+        let project = g.config.project_mapping(project_name, peer_name)?;
+        let live_connection = live_connection_for_config_peer(&g, peer_name);
+        let config = g.config.clone();
+        let config_path = g.config_path.clone();
+        let local_device = g.discoverer.local_device().clone();
+        drop(g);
+
+        let connection =
+            peer_transport_connection(&config_path, &config, peer_name, live_connection)?;
+        let target_dir = project.remote_code_dir.clone();
+        let request_id = aisync_discovery::new_pairing_request_id();
+
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .map_err(|error| AisyncError::Transport(format!("tokio runtime: {error}")))?;
+        runtime.block_on(async {
+            let identity = generate_tls_identity("aisync-client")?;
+            let tls = TlsConfig::new(identity, connection.server_name.clone())
+                .with_pinned_peer_cert(connection.receiver_cert_der.clone());
+            let mut transporter = TcpTransporter::connect_to_peer(
+                &connection.peer,
+                connection.endpoint.port(),
+                &tls,
+            )
+            .await?;
+            let response = transporter
+                .send_target_status_request(TargetStatusRequestPayload {
+                    request_id,
+                    target_dir,
+                    device: local_device,
+                })
+                .await;
+            transporter.shutdown().await;
+            response
+        })
+    }
+
+    /// 推送前覆盖检测（初始场景：从未同步过）：对端目标目录是否已有文件。
+    /// 出错时（对端离线/连接失败）返回 false（视为空，不阻断推送），但记日志。
+    pub fn check_target_not_empty(&self, project_name: &str, peer_name: &str) -> Result<bool> {
+        match self.probe_target_status(project_name, peer_name) {
+            Ok(resp) => {
+                app_log(
+                    "check_target_not_empty",
+                    &[
+                        ("project", project_name.to_string()),
+                        ("peer", peer_name.to_string()),
+                        ("not_empty", resp.not_empty.to_string()),
+                        ("file_count", resp.file_count.to_string()),
+                    ],
+                );
+                Ok(resp.not_empty)
+            }
+            Err(error) => {
+                app_log(
+                    "check_target_not_empty_failed",
+                    &[
+                        ("project", project_name.to_string()),
+                        ("peer", peer_name.to_string()),
+                        ("error", error.to_string()),
+                    ],
+                );
+                Ok(false)
+            }
+        }
+    }
+
+    /// 推送前脑裂检测：比对对端当前 manifest 指纹 vs 本端存的 peer_last_known_hash。
+    /// 返回前端弹窗所需的最小状态，不含文件级 diff。
+    pub fn check_split_brain(&self, project_name: &str, peer_name: &str) -> SplitBrainStatus {
+        let snapshot = {
+            let g = self.inner.lock().unwrap();
+            g.config.sync_snapshot(project_name, peer_name)
+        };
+
+        let resp = match self.probe_target_status(project_name, peer_name) {
+            Ok(resp) => resp,
+            Err(error) => {
+                // 对端不可达：无法判定，交由调用方/前端处理（视作未知，不阻断也不误报脑裂）。
+                app_log(
+                    "check_split_brain_unreachable",
+                    &[
+                        ("project", project_name.to_string()),
+                        ("peer", peer_name.to_string()),
+                        ("error", error.to_string()),
+                    ],
+                );
+                return SplitBrainStatus {
+                    reachable: false,
+                    has_snapshot: snapshot.is_some(),
+                    peer_not_empty: false,
+                    split_brain: false,
+                };
+            }
+        };
+
+        let split_brain = match &snapshot {
+            // 有快照：对端当前指纹 != 上次已知指纹 => 对端有独立变化 => 脑裂。
+            Some(snap) => resp.manifest_hash != snap.peer_last_known_hash,
+            // 无快照：从未同步过，不算脑裂（由 not_empty 覆盖检测处理）。
+            None => false,
+        };
+
+        app_log(
+            "check_split_brain",
+            &[
+                ("project", project_name.to_string()),
+                ("peer", peer_name.to_string()),
+                ("has_snapshot", snapshot.is_some().to_string()),
+                ("peer_not_empty", resp.not_empty.to_string()),
+                ("split_brain", split_brain.to_string()),
+            ],
+        );
+
+        SplitBrainStatus {
+            reachable: true,
+            has_snapshot: snapshot.is_some(),
+            peer_not_empty: resp.not_empty,
+            split_brain,
+        }
+    }
+}
+
+/// 推送前脑裂/覆盖检测结果，供前端决定弹哪种确认框。
+#[derive(Debug, Clone)]
+pub struct SplitBrainStatus {
+    /// 对端是否可达（不可达时其余字段无意义）。
+    pub reachable: bool,
+    /// 本端是否存有该 (项目, 对端) 的同步快照。
+    pub has_snapshot: bool,
+    /// 对端目标目录当前是否非空。
+    pub peer_not_empty: bool,
+    /// 是否检测到脑裂（有快照且对端当前指纹与上次已知不一致）。
+    pub split_brain: bool,
 }
 
 /// Real AI-tool status surfaced to the overview/settings UI.
@@ -6101,7 +6248,8 @@ fn run_project_auto_sync(
     live_connection: Option<PeerConnectionInfo>,
 ) -> Result<SyncReport> {
     let project = config.project_mapping(project_name, peer_name)?;
-    run_tcp_push(config_path, config, peer_name, &project, live_connection)
+    // 自动同步绝不静默覆盖：confirm_overwrite=false，由 50% 安全阀 + 回收站兜底。
+    run_tcp_push(config_path, config, peer_name, &project, live_connection, false)
 }
 
 fn run_workspace_auto_sync_outcome(
@@ -6130,6 +6278,7 @@ fn run_tcp_push(
     peer_name: &str,
     project: &aisync_core::ProjectMapping,
     live_connection: Option<PeerConnectionInfo>,
+    confirm_overwrite: bool,
 ) -> Result<SyncReport> {
     let connection = peer_transport_connection(config_path, config, peer_name, live_connection)?;
     app_log(
@@ -6160,10 +6309,13 @@ fn run_tcp_push(
             .with_pinned_peer_cert(connection.receiver_cert_der.clone());
         let mut transporter =
             TcpTransporter::connect_to_peer(&connection.peer, connection.endpoint.port(), &tls)
-                .await?;
+                .await?
+                .with_confirm_overwrite(confirm_overwrite);
         let code_manifest = transporter
             .sync_directory_to(&source, Some(&remote_code_dir), None)
             .await?;
+        // 发 close_notify 再断，避免对端下次读到「without close_notify」错误。
+        transporter.shutdown().await;
 
         let mut session_file_counts = Vec::new();
         for (_, plan) in &session_plans {
@@ -6180,6 +6332,7 @@ fn run_tcp_push(
                     None,
                 )
                 .await?;
+            transporter.shutdown().await;
             session_file_counts.push(manifest.files.len());
         }
 
@@ -6206,6 +6359,39 @@ fn run_tcp_push(
     }
     for (_, plan) in session_plans {
         let _ = fs::remove_dir_all(plan.staging_root);
+    }
+
+    // 快照：一次成功推送后，对端 code 目录内容 == 本端源内容，故两端指纹相同。
+    // 持久化供下次推送做脑裂检测（对端当前指纹 vs 此处存的 peer_last_known_hash）。
+    let synced_hash = aisync_transport::manifest_hash(&code_manifest);
+    if let Ok(mut persisted) = load_config(config_path) {
+        persisted.set_sync_snapshot(
+            &project.project_id,
+            peer_name,
+            aisync_sync::SyncSnapshot {
+                peer_last_known_hash: synced_hash.clone(),
+                self_last_synced_hash: synced_hash.clone(),
+            },
+        );
+        if let Err(error) = save_config(config_path, &persisted) {
+            app_log(
+                "sync_snapshot_persist_failed",
+                &[
+                    ("project", project.project_id.clone()),
+                    ("peer", peer_name.to_string()),
+                    ("error", error.to_string()),
+                ],
+            );
+        } else {
+            app_log(
+                "sync_snapshot_persisted",
+                &[
+                    ("project", project.project_id.clone()),
+                    ("peer", peer_name.to_string()),
+                    ("hash", synced_hash),
+                ],
+            );
+        }
     }
 
     Ok(SyncReport {
@@ -6347,7 +6533,7 @@ fn run_workspace_tcp_push(
         let mut transporter =
             TcpTransporter::connect_to_peer(&connection.peer, connection.endpoint.port(), &tls)
                 .await?;
-        transporter
+        let result = transporter
             .sync_directory_to_checked(&source, Some(&remote_root), None, |source, remote| {
                 let analysis = analyze_workspace_conflicts(&preflight_workspace, source, remote);
                 let has_conflicts = !analysis.conflicted_children.is_empty();
@@ -6364,7 +6550,9 @@ fn run_workspace_tcp_push(
                 }
                 Ok(())
             })
-            .await
+            .await;
+        transporter.shutdown().await;
+        result
     });
 
     let (code_files, workspace, conflicted_children, mut child_file_counts) = match code_result {
@@ -6431,6 +6619,7 @@ fn run_workspace_tcp_push(
                     let manifest = transporter
                         .sync_directory_to(&child.local_dir, Some(&child.remote_dir), None)
                         .await?;
+                    transporter.shutdown().await;
                     transferred += manifest.files.len();
                     increment_child_file_count(
                         &mut child_file_counts,
@@ -6472,6 +6661,7 @@ fn run_workspace_tcp_push(
                 let manifest = transporter
                     .sync_directory_to(&child.local_dir, Some(&child.remote_dir), None)
                     .await?;
+                transporter.shutdown().await;
                 app_log(
                     "workspace_empty_child_dir_transferred",
                     &[
@@ -6520,6 +6710,7 @@ fn run_workspace_tcp_push(
                 let manifest = transporter
                     .sync_directory_to(&transfer.staged_dir, Some(&transfer.remote_dir), None)
                     .await?;
+                transporter.shutdown().await;
                 plan_files += manifest.files.len();
             }
             for (child_name, files) in &plan.child_file_counts {
@@ -8487,6 +8678,7 @@ mod tests {
             sync_mode: SyncModeConfig::OneWayPush,
             enabled: true,
             exclude_rules: Vec::new(),
+            sync_snapshots: HashMap::new(),
         });
         assert!(!session_mtime_targets(&config)
             .iter()
@@ -8721,6 +8913,7 @@ mod tests {
             sync_mode: SyncModeConfig::OneWayPush,
             enabled: true,
             exclude_rules: Vec::new(),
+            sync_snapshots: HashMap::new(),
         });
         save_config(&config_path, &config).unwrap();
 
@@ -8834,6 +9027,7 @@ mod tests {
             sync_mode: SyncModeConfig::OneWayPush,
             enabled: true,
             exclude_rules: Vec::new(),
+            sync_snapshots: HashMap::new(),
         });
 
         let summary = history_summary_from_config(&config, "empty", None, None, "session");
@@ -9200,5 +9394,6 @@ pub fn project_config(
         sync_mode: mode,
         enabled: true,
         exclude_rules: Vec::new(),
+        sync_snapshots: std::collections::HashMap::new(),
     }
 }

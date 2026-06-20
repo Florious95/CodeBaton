@@ -120,6 +120,28 @@ impl SyncConfig {
             enabled: project.enabled,
         })
     }
+
+    /// 读取某 (项目, 对端) 的同步快照（脑裂检测用）。无则 None。
+    pub fn sync_snapshot(&self, project_name: &str, peer_name: &str) -> Option<SyncSnapshot> {
+        self.projects
+            .iter()
+            .find(|p| p.name == project_name)
+            .and_then(|p| p.sync_snapshots.get(peer_name).cloned())
+    }
+
+    /// 写入某 (项目, 对端) 的同步快照，覆盖旧值。项目不存在则忽略。
+    pub fn set_sync_snapshot(
+        &mut self,
+        project_name: &str,
+        peer_name: &str,
+        snapshot: SyncSnapshot,
+    ) {
+        if let Some(project) = self.projects.iter_mut().find(|p| p.name == project_name) {
+            project
+                .sync_snapshots
+                .insert(peer_name.to_string(), snapshot);
+        }
+    }
 }
 
 impl Default for SyncConfig {
@@ -156,6 +178,17 @@ pub struct ClaudeConfig {
     pub peers: HashMap<String, PathBuf>,
 }
 
+/// 一次成功同步后两端 manifest 指纹的快照，用于脑裂检测。每个 (项目, 对端) 一份。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SyncSnapshot {
+    /// 上次同步成功时，对端 manifest 的指纹。
+    #[serde(default)]
+    pub peer_last_known_hash: String,
+    /// 上次同步成功时，本端 manifest 的指纹。
+    #[serde(default)]
+    pub self_last_synced_hash: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectConfig {
     pub name: String,
@@ -168,6 +201,9 @@ pub struct ProjectConfig {
     pub enabled: bool,
     #[serde(default)]
     pub exclude_rules: Vec<String>,
+    /// 按对端名索引的同步快照（脑裂检测）。旧配置无此字段，默认空。
+    #[serde(default)]
+    pub sync_snapshots: HashMap<String, SyncSnapshot>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

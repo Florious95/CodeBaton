@@ -195,6 +195,7 @@ fn run(cli: Cli) -> Result<()> {
                 sync_mode: SyncModeConfig::TwoWayAuto,
                 enabled: true,
                 exclude_rules: Vec::new(),
+                sync_snapshots: HashMap::new(),
             });
             save_config(&config_path, &config)?;
             println!("added project {project_name} for peer {peer}");
