@@ -883,6 +883,126 @@ impl TcpTransporter {
         }
     }
 
+    pub async fn send_file_transfer_request_with_stage_log<F>(
+        &mut self,
+        request: FileTransferRequestPayload,
+        mut stage_log: F,
+    ) -> Result<()>
+    where
+        F: FnMut(&str, Vec<(&'static str, String)>),
+    {
+        let transfer_id = request.transfer_id.clone();
+        let filename = request.filename.clone();
+        stage_log(
+            "ft_control_hello_write",
+            vec![
+                ("transfer_id", transfer_id.clone()),
+                ("filename", filename.clone()),
+                ("status", "start".to_string()),
+            ],
+        );
+        write_message(
+            &mut self.stream,
+            &Message::Hello {
+                protocol_version: PROTOCOL_VERSION,
+                device_name: request.sender_name.clone(),
+            },
+        )
+        .await?;
+        stage_log(
+            "ft_control_hello_write",
+            vec![
+                ("transfer_id", transfer_id.clone()),
+                ("filename", filename.clone()),
+                ("status", "ok".to_string()),
+            ],
+        );
+
+        stage_log(
+            "ft_control_hello_read",
+            vec![
+                ("transfer_id", transfer_id.clone()),
+                ("filename", filename.clone()),
+                ("status", "start".to_string()),
+            ],
+        );
+        expect_hello(read_message(&mut self.stream).await?)?;
+        stage_log(
+            "ft_control_hello_read",
+            vec![
+                ("transfer_id", transfer_id.clone()),
+                ("filename", filename.clone()),
+                ("status", "ok".to_string()),
+            ],
+        );
+
+        stage_log(
+            "ft_control_request_write",
+            vec![
+                ("transfer_id", transfer_id.clone()),
+                ("filename", filename.clone()),
+                ("status", "start".to_string()),
+            ],
+        );
+        write_message(&mut self.stream, &Message::FileTransferRequest { request }).await?;
+        stage_log(
+            "ft_control_request_write",
+            vec![
+                ("transfer_id", transfer_id.clone()),
+                ("filename", filename),
+                ("status", "ok".to_string()),
+            ],
+        );
+
+        stage_log(
+            "ft_control_ack_read",
+            vec![
+                ("transfer_id", transfer_id.clone()),
+                ("status", "start".to_string()),
+            ],
+        );
+        let message = tokio::time::timeout(Duration::from_secs(10), read_message(&mut self.stream))
+            .await
+            .map_err(|_| {
+                stage_log(
+                    "ft_control_ack_timeout",
+                    vec![("transfer_id", transfer_id.clone())],
+                );
+                transport_err(format!(
+                    "file transfer ack timed out after 10000ms for {transfer_id}"
+                ))
+            })??;
+        match message {
+            Message::FileTransferAck { ack } if ack.transfer_id == transfer_id => {
+                stage_log(
+                    "ft_control_ack_read",
+                    vec![
+                        ("transfer_id", transfer_id.clone()),
+                        ("status", "ok".to_string()),
+                        ("accepted", ack.accepted.to_string()),
+                        ("ready", ack.ready.to_string()),
+                    ],
+                );
+                if ack.accepted {
+                    Ok(())
+                } else {
+                    Err(transport_err(ack.message.unwrap_or_else(|| {
+                        "file transfer request rejected".to_string()
+                    })))
+                }
+            }
+            Message::FileTransferAck { ack } => Err(transport_err(format!(
+                "file transfer ack mismatch: expected {transfer_id}, got {}",
+                ack.transfer_id
+            ))),
+            Message::Error { message } => Err(transport_err(message)),
+            other => Err(transport_err(format!(
+                "expected FileTransferAck, got {:?}",
+                other.message_type()
+            ))),
+        }
+    }
+
     pub async fn send_file_transfer_ack(&mut self, ack: FileTransferAckPayload) -> Result<()> {
         let transfer_id = ack.transfer_id.clone();
         let started = Instant::now();

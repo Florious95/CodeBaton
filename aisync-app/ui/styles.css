@@ -345,6 +345,10 @@ select.pill {
   overflow-y: auto;
   padding: 24px 28px 34px;
   position: relative;
+  /* ISS-031 根因：grid 子项默认 min-width:auto，长内容会撑宽整列。
+     min-width:0 允许收缩，overflow-x:hidden 兜底横向溢出。 */
+  min-width: 0;
+  overflow-x: hidden;
 }
 
 /* 中/EN segmented toggle — lives in the title bar, right-aligned (prototype). */
@@ -1114,6 +1118,10 @@ select.pill {
   border-radius: var(--radius);
   overflow: hidden;
   background: var(--bg-elevated);
+  /* ISS-031：约束宽度，配合 .main 的 min-width:0 形成完整约束链。 */
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
 }
 .chat-log {
   flex: 1;
@@ -1124,6 +1132,7 @@ select.pill {
   flex-direction: column;
   gap: 8px;
   min-width: 0;
+  max-width: 100%; /* ISS-031 */
 }
 .chat-msg {
   display: flex;

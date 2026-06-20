@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Copy } from "lucide-react";
 import { pushToast, useStore } from "./store";
+import { ipc } from "./ipc";
 import { fmtTime } from "./util";
 
 // ISS-031 第四轮兜底：即使外部 CSS 因某种原因没生效，也用 inline style
@@ -36,10 +37,12 @@ export function ChatTab({ peerName, online }: { peerName: string; online: boolea
     const el = lastBubbleRef.current;
     if (!el || messages.length === 0) return;
     const overflow = el.scrollWidth - el.clientWidth;
-    console.log(
+    const line =
       `[ISS-031] bubble scrollWidth=${el.scrollWidth} clientWidth=${el.clientWidth} ` +
-        `overflow=${overflow}px logEl=${el.offsetWidth} ${overflow > 1 ? "⚠️撑破" : "OK"}`,
-    );
+      `overflow=${overflow}px logEl=${el.offsetWidth} ${overflow > 1 ? "⚠️撑破" : "OK"}`;
+    console.log(line);
+    // 通过 IPC 落到 ~/.aisync/logs/aisync.log，安装后无 devtools 也能取证（QA round4 要求）。
+    ipc.uiLog(line);
   }, [messages.length]);
 
   // 进入该会话的对话 Tab → 清未读角标（ISS-020）。

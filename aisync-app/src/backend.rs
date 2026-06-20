@@ -42,9 +42,32 @@ const AUTO_SYNC_COOLDOWN: Duration = Duration::from_secs(90);
 const FILE_TRANSFER_CONTROL_TIMEOUT: Duration = Duration::from_secs(10);
 const HISTORY_FILE_LIMIT: usize = 5;
 static INCOMING_SYNC_SUPPRESSIONS: OnceLock<Mutex<HashMap<PathBuf, Instant>>> = OnceLock::new();
+static AUTO_SYNC_GATES: OnceLock<Mutex<HashMap<String, AutoSyncGate>>> = OnceLock::new();
+static SESSION_BASELINE_SEEDS: OnceLock<Mutex<HashMap<String, SessionBaseline>>> = OnceLock::new();
+
+#[derive(Clone, Copy)]
+struct AutoSyncGate {
+    in_flight: bool,
+    cooldown_until: Instant,
+}
+
+#[derive(Clone)]
+struct SessionBaseline {
+    mtime: SystemTime,
+    content_fingerprint: Option<String>,
+    sync_fingerprint: Option<String>,
+}
 
 fn incoming_sync_suppressions() -> &'static Mutex<HashMap<PathBuf, Instant>> {
     INCOMING_SYNC_SUPPRESSIONS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn auto_sync_gates() -> &'static Mutex<HashMap<String, AutoSyncGate>> {
+    AUTO_SYNC_GATES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn session_baseline_seeds() -> &'static Mutex<HashMap<String, SessionBaseline>> {
+    SESSION_BASELINE_SEEDS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 fn mark_incoming_sync_root(root: &Path) {
@@ -61,6 +84,53 @@ fn incoming_sync_recent(root: &Path) -> bool {
     guard
         .keys()
         .any(|incoming| incoming.starts_with(root) || root.starts_with(incoming))
+}
+
+fn auto_sync_gate_key(scope: &str, name: &str, peer: &str) -> String {
+    format!("{scope}:{name}:{peer}")
+}
+
+fn try_begin_auto_sync(scope: &str, name: &str, peer: &str, trigger: &str) -> Option<String> {
+    let key = auto_sync_gate_key(scope, name, peer);
+    let now = Instant::now();
+    let mut gates = auto_sync_gates().lock().unwrap();
+    gates.retain(|_, gate| gate.in_flight || gate.cooldown_until > now);
+    if let Some(gate) = gates.get(&key) {
+        let reason = if gate.in_flight {
+            "in_flight"
+        } else {
+            "cooldown"
+        };
+        app_log(
+            "auto_sync_suppressed",
+            &[
+                ("scope", scope.to_string()),
+                ("name", name.to_string()),
+                ("peer", peer.to_string()),
+                ("trigger", trigger.to_string()),
+                ("reason", reason.to_string()),
+            ],
+        );
+        return None;
+    }
+    gates.insert(
+        key.clone(),
+        AutoSyncGate {
+            in_flight: true,
+            cooldown_until: now,
+        },
+    );
+    Some(key)
+}
+
+fn finish_auto_sync(gate_key: &str) {
+    auto_sync_gates().lock().unwrap().insert(
+        gate_key.to_string(),
+        AutoSyncGate {
+            in_flight: false,
+            cooldown_until: Instant::now() + AUTO_SYNC_COOLDOWN,
+        },
+    );
 }
 
 /// Where an incoming push lands. Per-instance receive root next to the config.
@@ -2272,8 +2342,30 @@ impl Backend {
                 let g = self.inner.lock().unwrap();
                 live_connection_for_config_peer(&g, &peer_name)
             };
+            let initial_gate =
+                try_begin_auto_sync("workspace", &workspace.name, &peer_name, "initial_sync");
+            if initial_gate.is_none() {
+                app_log(
+                    "workspace_initial_sync_suppressed",
+                    &[
+                        ("workspace", workspace.name.clone()),
+                        ("peer", peer_name.clone()),
+                        ("reason", "coalesced".to_string()),
+                    ],
+                );
+                continue;
+            }
+            let initial_gate = initial_gate.unwrap();
             match run_workspace_auto_sync(&config_path, &candidate, &workspace, live_connection) {
                 Ok(report) => {
+                    let post_config =
+                        load_config(&config_path).unwrap_or_else(|_| candidate.clone());
+                    seed_session_baselines_for_workspace(
+                        &config_path,
+                        &post_config,
+                        &workspace.name,
+                        &peer_name,
+                    );
                     let files =
                         (report.code_files_transferred + report.session_files_transferred) as u32;
                     record_auto_sync_history(
@@ -2329,9 +2421,11 @@ impl Backend {
                             ("error", detail),
                         ],
                     );
+                    finish_auto_sync(&initial_gate);
                     return Err(error);
                 }
             }
+            finish_auto_sync(&initial_gate);
             app_log(
                 "workspace_saved",
                 &[
@@ -2732,17 +2826,88 @@ fn send_file_transfer_request(
         .build()
         .map_err(|error| AisyncError::Transport(format!("tokio runtime: {error}")))?;
     runtime.block_on(async move {
+        let transfer_id = request.transfer_id.clone();
+        let filename = request.filename.clone();
+        app_log(
+            "ft_control_connect_start",
+            &[
+                ("endpoint", endpoint.to_string()),
+                ("transfer_id", transfer_id.clone()),
+                ("filename", filename.clone()),
+            ],
+        );
+        let mut client = match tokio::time::timeout(
+            FILE_TRANSFER_CONTROL_TIMEOUT,
+            TcpTransporter::connect_addr(endpoint, &tls),
+        )
+        .await
+        {
+            Ok(Ok(client)) => {
+                app_log(
+                    "ft_control_connect_ok",
+                    &[
+                        ("endpoint", endpoint.to_string()),
+                        ("transfer_id", transfer_id.clone()),
+                        ("filename", filename.clone()),
+                    ],
+                );
+                client
+            }
+            Ok(Err(error)) => {
+                app_log(
+                    "ft_control_connect_failed",
+                    &[
+                        ("endpoint", endpoint.to_string()),
+                        ("transfer_id", transfer_id.clone()),
+                        ("filename", filename.clone()),
+                        ("error", error.to_string()),
+                    ],
+                );
+                return Err(error);
+            }
+            Err(_) => {
+                let error = AisyncError::Transport(format!(
+                    "file transfer control connect timed out after {}ms to {}",
+                    FILE_TRANSFER_CONTROL_TIMEOUT.as_millis(),
+                    endpoint
+                ));
+                app_log(
+                    "ft_control_connect_failed",
+                    &[
+                        ("endpoint", endpoint.to_string()),
+                        ("transfer_id", transfer_id.clone()),
+                        ("filename", filename.clone()),
+                        ("error", error.to_string()),
+                    ],
+                );
+                return Err(error);
+            }
+        };
+
         tokio::time::timeout(FILE_TRANSFER_CONTROL_TIMEOUT, async move {
-            let mut client = TcpTransporter::connect_addr(endpoint, &tls).await?;
-            client.send_file_transfer_request(request).await
+            client
+                .send_file_transfer_request_with_stage_log(request, |event, fields| {
+                    app_log(event, &fields);
+                })
+                .await
         })
         .await
         .map_err(|_| {
-            AisyncError::Transport(format!(
+            let error = AisyncError::Transport(format!(
                 "file transfer control request timed out after {}ms to {}",
                 FILE_TRANSFER_CONTROL_TIMEOUT.as_millis(),
                 endpoint
-            ))
+            ));
+            app_log(
+                "ft_control_ack_timeout",
+                &[
+                    ("endpoint", endpoint.to_string()),
+                    ("transfer_id", transfer_id),
+                    ("filename", filename),
+                    ("error", error.to_string()),
+                ],
+            );
+            error
         })?
     })
 }
@@ -4204,15 +4369,41 @@ fn start_project_watcher(
             let fingerprint = project_auto_sync_fingerprint(&config, &project_name, &peer_name);
             if fingerprint.is_some() && fingerprint == last_fingerprint {
                 app_log(
-                    "auto_sync_skipped_no_change",
+                    "sync_fingerprint_gate_hit",
                     &[
                         ("scope", "project".to_string()),
                         ("name", project_name.clone()),
                         ("peer", peer_name.clone()),
                         ("trigger", "watcher".to_string()),
+                        (
+                            "hash",
+                            fingerprint
+                                .as_ref()
+                                .map(|hash| hash_prefix(hash))
+                                .unwrap_or_default(),
+                        ),
                     ],
                 );
                 continue;
+            }
+            if let Some(fingerprint) = &fingerprint {
+                app_log(
+                    "sync_fingerprint_gate_miss",
+                    &[
+                        ("scope", "project".to_string()),
+                        ("name", project_name.clone()),
+                        ("peer", peer_name.clone()),
+                        ("trigger", "watcher".to_string()),
+                        ("hash", hash_prefix(fingerprint)),
+                        (
+                            "previous",
+                            last_fingerprint
+                                .as_ref()
+                                .map(|previous| hash_prefix(previous))
+                                .unwrap_or_default(),
+                        ),
+                    ],
+                );
             }
             if incoming_sync_recent(&project_root) {
                 app_log(
@@ -4230,8 +4421,29 @@ fn start_project_watcher(
                 suppress_until = Some(Instant::now() + AUTO_SYNC_COOLDOWN);
                 continue;
             }
+            let Some(gate_key) =
+                try_begin_auto_sync("project", &project_name, &peer_name, "watcher")
+            else {
+                continue;
+            };
             match run_project_auto_sync(&config_path, &config, &project_name, &peer_name, None) {
                 Ok(report) => {
+                    let post_config = load_config(&config_path).unwrap_or_else(|_| config.clone());
+                    if let Some(post_fingerprint) =
+                        project_auto_sync_fingerprint(&post_config, &project_name, &peer_name)
+                    {
+                        app_log(
+                            "baseline_updated",
+                            &[
+                                ("scope", "project".to_string()),
+                                ("name", project_name.clone()),
+                                ("peer", peer_name.clone()),
+                                ("trigger", "watcher".to_string()),
+                                ("hash", hash_prefix(&post_fingerprint)),
+                            ],
+                        );
+                        last_fingerprint = Some(post_fingerprint);
+                    }
                     let files =
                         (report.code_files_transferred + report.session_files_transferred) as u32;
                     record_auto_sync_history(
@@ -4274,9 +4486,7 @@ fn start_project_watcher(
                     );
                 }
             }
-            if fingerprint.is_some() {
-                last_fingerprint = fingerprint;
-            }
+            finish_auto_sync(&gate_key);
             suppress_until = Some(Instant::now() + AUTO_SYNC_COOLDOWN);
         }
     });
@@ -4379,14 +4589,39 @@ fn start_workspace_watcher(
             let fingerprint = workspace_auto_sync_fingerprint(&config, &workspace);
             if fingerprint.is_some() && fingerprint == last_fingerprint {
                 app_log(
-                    "auto_sync_skipped_no_change",
+                    "sync_fingerprint_gate_hit",
                     &[
                         ("scope", "workspace".to_string()),
                         ("name", workspace_name.clone()),
                         ("trigger", "watcher".to_string()),
+                        (
+                            "hash",
+                            fingerprint
+                                .as_ref()
+                                .map(|hash| hash_prefix(hash))
+                                .unwrap_or_default(),
+                        ),
                     ],
                 );
                 continue;
+            }
+            if let Some(fingerprint) = &fingerprint {
+                app_log(
+                    "sync_fingerprint_gate_miss",
+                    &[
+                        ("scope", "workspace".to_string()),
+                        ("name", workspace_name.clone()),
+                        ("trigger", "watcher".to_string()),
+                        ("hash", hash_prefix(fingerprint)),
+                        (
+                            "previous",
+                            last_fingerprint
+                                .as_ref()
+                                .map(|previous| hash_prefix(previous))
+                                .unwrap_or_default(),
+                        ),
+                    ],
+                );
             }
             if incoming_sync_recent(&workspace_root) {
                 app_log(
@@ -4403,8 +4638,36 @@ fn start_workspace_watcher(
                 suppress_until = Some(Instant::now() + AUTO_SYNC_COOLDOWN);
                 continue;
             }
+            let peer_name = workspace.effective_peer().unwrap_or_default().to_string();
+            let Some(gate_key) =
+                try_begin_auto_sync("workspace", &workspace_name, &peer_name, "watcher")
+            else {
+                continue;
+            };
             match run_workspace_auto_sync(&config_path, &config, &workspace, None) {
                 Ok(report) => {
+                    let post_config = load_config(&config_path).unwrap_or_else(|_| config.clone());
+                    if let Some(updated_workspace) = post_config
+                        .workspaces
+                        .iter()
+                        .find(|workspace| workspace.name == workspace_name)
+                    {
+                        if let Some(post_fingerprint) =
+                            workspace_auto_sync_fingerprint(&post_config, updated_workspace)
+                        {
+                            app_log(
+                                "baseline_updated",
+                                &[
+                                    ("scope", "workspace".to_string()),
+                                    ("name", workspace_name.clone()),
+                                    ("peer", peer_name.clone()),
+                                    ("trigger", "watcher".to_string()),
+                                    ("hash", hash_prefix(&post_fingerprint)),
+                                ],
+                            );
+                            last_fingerprint = Some(post_fingerprint);
+                        }
+                    }
                     let files =
                         (report.code_files_transferred + report.session_files_transferred) as u32;
                     record_auto_sync_history(
@@ -4460,9 +4723,7 @@ fn start_workspace_watcher(
                     );
                 }
             }
-            if fingerprint.is_some() {
-                last_fingerprint = fingerprint;
-            }
+            finish_auto_sync(&gate_key);
             suppress_until = Some(Instant::now() + AUTO_SYNC_COOLDOWN);
         }
     });
@@ -4645,12 +4906,122 @@ struct SessionMtimeTarget {
     path: PathBuf,
 }
 
+fn session_target_key(target: &SessionMtimeTarget) -> String {
+    format!(
+        "{}:{}:{}:{}:{}",
+        target.scope,
+        target.name,
+        target.peer,
+        target.tool,
+        target.path.display()
+    )
+}
+
+fn session_sync_key(target: &SessionMtimeTarget) -> String {
+    auto_sync_gate_key(target.scope, &target.name, &target.peer)
+}
+
+fn session_seed_key(config_path: &Path, target_key: &str) -> String {
+    format!("{}:{target_key}", config_path.display())
+}
+
+fn hash_prefix(fingerprint: &str) -> String {
+    fingerprint.chars().take(8).collect()
+}
+
+fn baseline_session_target(
+    config_path: &Path,
+    config: &SyncConfig,
+    target: &SessionMtimeTarget,
+    mtime: SystemTime,
+    seen: &mut HashMap<String, SystemTime>,
+    content_seen: &mut HashMap<String, String>,
+    sync_seen: &mut HashMap<String, String>,
+    event: &str,
+) {
+    let key = session_target_key(target);
+    let sync_key = session_sync_key(target);
+    let seeded = session_baseline_seeds()
+        .lock()
+        .unwrap()
+        .remove(&session_seed_key(config_path, &key));
+    let baseline = seeded.unwrap_or_else(|| SessionBaseline {
+        mtime,
+        content_fingerprint: target_content_fingerprint(target),
+        sync_fingerprint: sync_fingerprint_for_target(config, target),
+    });
+    seen.insert(key.clone(), baseline.mtime);
+    if let Some(fingerprint) = baseline.content_fingerprint {
+        content_seen.insert(key.clone(), fingerprint);
+    }
+    let sync_hash = baseline
+        .sync_fingerprint
+        .as_ref()
+        .map(|hash| hash_prefix(hash));
+    if let Some(fingerprint) = baseline.sync_fingerprint {
+        sync_seen.insert(sync_key.clone(), fingerprint);
+    }
+    app_log(
+        event,
+        &[
+            ("target_key", key),
+            ("sync_key", sync_key),
+            ("scope", target.scope.to_string()),
+            ("name", target.name.clone()),
+            ("peer", target.peer.clone()),
+            ("tool", target.tool.to_string()),
+            ("path", target.path.display().to_string()),
+            ("hash", sync_hash.unwrap_or_default()),
+        ],
+    );
+}
+
+fn seed_session_baselines_for_workspace(
+    config_path: &Path,
+    config: &SyncConfig,
+    workspace_name: &str,
+    peer_name: &str,
+) {
+    for target in session_mtime_targets(config) {
+        if target.scope != "workspace" || target.name != workspace_name || target.peer != peer_name
+        {
+            continue;
+        }
+        let scan_limit = if target.tool == "codex" { 32 } else { 256 };
+        let Some(mtime) = latest_mtime_limited(&target.path, scan_limit) else {
+            continue;
+        };
+        let key = session_target_key(&target);
+        let sync_fingerprint = sync_fingerprint_for_target(config, &target);
+        let sync_hash = sync_fingerprint.as_ref().map(|hash| hash_prefix(hash));
+        session_baseline_seeds().lock().unwrap().insert(
+            session_seed_key(config_path, &key),
+            SessionBaseline {
+                mtime,
+                content_fingerprint: target_content_fingerprint(&target),
+                sync_fingerprint,
+            },
+        );
+        app_log(
+            "baseline_updated",
+            &[
+                ("target_key", key),
+                ("scope", target.scope.to_string()),
+                ("name", target.name.clone()),
+                ("peer", target.peer.clone()),
+                ("tool", target.tool.to_string()),
+                ("trigger", "initial_sync".to_string()),
+                ("hash", sync_hash.unwrap_or_default()),
+            ],
+        );
+    }
+}
+
 fn start_session_mtime_scanner(config_path: PathBuf, fallback_config: SyncConfig) {
     std::thread::spawn(move || {
         let mut seen = HashMap::<String, SystemTime>::new();
         let mut content_seen = HashMap::<String, String>::new();
         let mut sync_seen = HashMap::<String, String>::new();
-        let mut initialized = false;
         loop {
             let mut config = load_config(&config_path).unwrap_or_else(|_| fallback_config.clone());
             if let Some(refreshed_config) = refresh_and_save_workspaces(&config_path) {
@@ -4680,47 +5051,35 @@ fn start_session_mtime_scanner(config_path: PathBuf, fallback_config: SyncConfig
                 let Some(mtime) = mtime else {
                     continue;
                 };
-                let key = format!(
-                    "{}:{}:{}:{}:{}",
-                    target.scope,
-                    target.name,
-                    target.peer,
-                    target.tool,
-                    target.path.display()
-                );
-                let sync_key = format!("{}:{}:{}", target.scope, target.name, target.peer);
+                let key = session_target_key(&target);
+                let sync_key = session_sync_key(&target);
                 let changed = match seen.get(&key) {
                     Some(previous) => mtime > *previous,
-                    None => initialized,
+                    None => {
+                        baseline_session_target(
+                            &config_path,
+                            &config,
+                            &target,
+                            mtime,
+                            &mut seen,
+                            &mut content_seen,
+                            &mut sync_seen,
+                            "new_target_baselined",
+                        );
+                        continue;
+                    }
                 };
-                seen.insert(key, mtime);
+                seen.insert(key.clone(), mtime);
                 if !changed {
                     if let Some(fingerprint) = target_content_fingerprint(&target) {
-                        content_seen.insert(
-                            format!(
-                                "{}:{}:{}:{}:{}",
-                                target.scope,
-                                target.name,
-                                target.peer,
-                                target.tool,
-                                target.path.display()
-                            ),
-                            fingerprint,
-                        );
+                        content_seen.insert(key.clone(), fingerprint);
                     }
                     if let Some(fingerprint) = sync_fingerprint_for_target(&config, &target) {
                         sync_seen.insert(sync_key, fingerprint);
                     }
                     continue;
                 }
-                let content_key = format!(
-                    "{}:{}:{}:{}:{}",
-                    target.scope,
-                    target.name,
-                    target.peer,
-                    target.tool,
-                    target.path.display()
-                );
+                let content_key = key.clone();
                 let fingerprint = target_content_fingerprint(&target);
                 if fingerprint.is_some() && content_seen.get(&content_key) == fingerprint.as_ref() {
                     app_log(
@@ -4757,18 +5116,44 @@ fn start_session_mtime_scanner(config_path: PathBuf, fallback_config: SyncConfig
                 if sync_fingerprint.is_some()
                     && sync_seen.get(&sync_key) == sync_fingerprint.as_ref()
                 {
+                    let hash = sync_fingerprint
+                        .as_ref()
+                        .map(|fingerprint| hash_prefix(fingerprint))
+                        .unwrap_or_default();
                     app_log(
-                        "auto_sync_skipped_no_change",
+                        "sync_fingerprint_gate_hit",
                         &[
                             ("scope", target.scope.to_string()),
                             ("name", target.name.clone()),
                             ("peer", target.peer.clone()),
                             ("tool", target.tool.to_string()),
                             ("trigger", "mtime".to_string()),
-                            ("reason", "sync_fingerprint_unchanged".to_string()),
+                            ("target_key", key.clone()),
+                            ("hash", hash),
                         ],
                     );
                     continue;
+                }
+                if let Some(fingerprint) = &sync_fingerprint {
+                    app_log(
+                        "sync_fingerprint_gate_miss",
+                        &[
+                            ("scope", target.scope.to_string()),
+                            ("name", target.name.clone()),
+                            ("peer", target.peer.clone()),
+                            ("tool", target.tool.to_string()),
+                            ("trigger", "mtime".to_string()),
+                            ("target_key", key.clone()),
+                            ("hash", hash_prefix(fingerprint)),
+                            (
+                                "previous",
+                                sync_seen
+                                    .get(&sync_key)
+                                    .map(|previous| hash_prefix(previous))
+                                    .unwrap_or_default(),
+                            ),
+                        ],
+                    );
                 }
 
                 app_log(
@@ -4786,6 +5171,11 @@ fn start_session_mtime_scanner(config_path: PathBuf, fallback_config: SyncConfig
                     continue;
                 }
 
+                let Some(gate_key) =
+                    try_begin_auto_sync(target.scope, &target.name, &target.peer, "mtime")
+                else {
+                    continue;
+                };
                 app_log(
                     "session_incremental_sync_started",
                     &[
@@ -4825,10 +5215,19 @@ fn start_session_mtime_scanner(config_path: PathBuf, fallback_config: SyncConfig
 
                 match result {
                     Ok(report) => {
-                        if let Some(fingerprint) = sync_fingerprint {
-                            sync_seen.insert(
-                                format!("{}:{}:{}", target.scope, target.name, target.peer),
-                                fingerprint,
+                        let scan_limit = if target.tool == "codex" { 32 } else { 256 };
+                        if let Some(post_mtime) = latest_mtime_limited(&target.path, scan_limit) {
+                            let post_config =
+                                load_config(&config_path).unwrap_or_else(|_| config.clone());
+                            baseline_session_target(
+                                &config_path,
+                                &post_config,
+                                &target,
+                                post_mtime,
+                                &mut seen,
+                                &mut content_seen,
+                                &mut sync_seen,
+                                "baseline_updated",
                             );
                         }
                         let files = (report.code_files_transferred
@@ -4899,10 +5298,10 @@ fn start_session_mtime_scanner(config_path: PathBuf, fallback_config: SyncConfig
                         );
                     }
                 }
+                finish_auto_sync(&gate_key);
             }
 
             std::thread::sleep(Duration::from_secs(interval_secs));
-            initialized = true;
         }
     });
 }
