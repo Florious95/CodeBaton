@@ -899,7 +899,7 @@ pub fn request_file_transfer(
 }
 
 #[tauri::command]
-pub async fn pick_files_for_transfer(
+pub fn pick_files_for_transfer(
     app: AppHandle,
     backend: State<'_, Backend>,
     peer_name: String,

@@ -44,6 +44,7 @@ const HISTORY_FILE_LIMIT: usize = 5;
 static INCOMING_SYNC_SUPPRESSIONS: OnceLock<Mutex<HashMap<PathBuf, Instant>>> = OnceLock::new();
 static AUTO_SYNC_GATES: OnceLock<Mutex<HashMap<String, AutoSyncGate>>> = OnceLock::new();
 static SESSION_BASELINE_SEEDS: OnceLock<Mutex<HashMap<String, SessionBaseline>>> = OnceLock::new();
+static WORKSPACE_PROPAGATION_BYPASS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 
 #[derive(Clone, Copy)]
 struct AutoSyncGate {
@@ -68,6 +69,10 @@ fn auto_sync_gates() -> &'static Mutex<HashMap<String, AutoSyncGate>> {
 
 fn session_baseline_seeds() -> &'static Mutex<HashMap<String, SessionBaseline>> {
     SESSION_BASELINE_SEEDS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn workspace_propagation_bypass() -> &'static Mutex<HashSet<String>> {
+    WORKSPACE_PROPAGATION_BYPASS.get_or_init(|| Mutex::new(HashSet::new()))
 }
 
 fn mark_incoming_sync_root(root: &Path) {
@@ -123,6 +128,39 @@ fn try_begin_auto_sync(scope: &str, name: &str, peer: &str, trigger: &str) -> Op
     Some(key)
 }
 
+fn begin_auto_sync_bypass_cooldown(
+    scope: &str,
+    name: &str,
+    peer: &str,
+    trigger: &str,
+) -> Option<String> {
+    let key = auto_sync_gate_key(scope, name, peer);
+    let now = Instant::now();
+    let mut gates = auto_sync_gates().lock().unwrap();
+    gates.retain(|_, gate| gate.in_flight || gate.cooldown_until > now);
+    if gates.get(&key).map(|gate| gate.in_flight).unwrap_or(false) {
+        app_log(
+            "auto_sync_suppressed",
+            &[
+                ("scope", scope.to_string()),
+                ("name", name.to_string()),
+                ("peer", peer.to_string()),
+                ("trigger", trigger.to_string()),
+                ("reason", "in_flight".to_string()),
+            ],
+        );
+        return None;
+    }
+    gates.insert(
+        key.clone(),
+        AutoSyncGate {
+            in_flight: true,
+            cooldown_until: now,
+        },
+    );
+    Some(key)
+}
+
 fn finish_auto_sync(gate_key: &str) {
     auto_sync_gates().lock().unwrap().insert(
         gate_key.to_string(),
@@ -131,6 +169,37 @@ fn finish_auto_sync(gate_key: &str) {
             cooldown_until: Instant::now() + AUTO_SYNC_COOLDOWN,
         },
     );
+}
+
+fn enqueue_workspace_first_propagation(workspace: &WorkspaceConfig) {
+    let Some(peer) = workspace.effective_peer() else {
+        return;
+    };
+    workspace_propagation_bypass()
+        .lock()
+        .unwrap()
+        .insert(auto_sync_gate_key("workspace", &workspace.name, peer));
+    app_log(
+        "workspace_first_propagation_queued",
+        &[
+            ("workspace", workspace.name.clone()),
+            ("peer", peer.to_string()),
+        ],
+    );
+}
+
+fn workspace_first_propagation_pending(workspace_name: &str, peer_name: &str) -> bool {
+    workspace_propagation_bypass()
+        .lock()
+        .unwrap()
+        .contains(&auto_sync_gate_key("workspace", workspace_name, peer_name))
+}
+
+fn clear_workspace_first_propagation(workspace_name: &str, peer_name: &str) {
+    workspace_propagation_bypass()
+        .lock()
+        .unwrap()
+        .remove(&auto_sync_gate_key("workspace", workspace_name, peer_name));
 }
 
 /// Where an incoming push lands. Per-instance receive root next to the config.
@@ -2356,8 +2425,13 @@ impl Backend {
                 continue;
             }
             let initial_gate = initial_gate.unwrap();
-            match run_workspace_auto_sync(&config_path, &candidate, &workspace, live_connection) {
-                Ok(report) => {
+            match run_workspace_auto_sync_outcome(
+                &config_path,
+                &candidate,
+                &workspace,
+                live_connection,
+            ) {
+                Ok(outcome) => {
                     let post_config =
                         load_config(&config_path).unwrap_or_else(|_| candidate.clone());
                     seed_session_baselines_for_workspace(
@@ -2366,8 +2440,9 @@ impl Backend {
                         &workspace.name,
                         &peer_name,
                     );
-                    let files =
-                        (report.code_files_transferred + report.session_files_transferred) as u32;
+                    let files = (outcome.report.code_files_transferred
+                        + outcome.report.session_files_transferred)
+                        as u32;
                     record_auto_sync_history(
                         &config_path,
                         &workspace.name,
@@ -2380,10 +2455,11 @@ impl Backend {
                     );
                     record_auto_workspace_child_history(
                         &config_path,
-                        &workspace,
+                        &outcome.workspace,
                         true,
                         None,
                         "mixed",
+                        Some(&outcome.child_file_counts),
                     );
                     app_log(
                         "workspace_initial_sync_complete",
@@ -2412,6 +2488,7 @@ impl Backend {
                         false,
                         Some(&detail),
                         "mixed",
+                        None,
                     );
                     app_log(
                         "workspace_initial_sync_failed",
@@ -4043,15 +4120,38 @@ fn record_auto_workspace_child_history(
     success: bool,
     detail: Option<&str>,
     file_type: &str,
+    child_file_counts: Option<&HashMap<String, u32>>,
 ) {
     for child in &workspace.children {
         if !child.enabled || child.conflicted {
             continue;
         }
-        let files = if success {
-            count_files_recursive(&child.local_dir) as u32
-        } else {
-            0
+        let files = match (success, child_file_counts) {
+            (true, Some(counts)) => {
+                let files = counts.get(&child.name).copied().unwrap_or(0);
+                if files == 0 {
+                    continue;
+                }
+                files
+            }
+            (true, None) => {
+                let Ok(config) = load_config(config_path) else {
+                    continue;
+                };
+                let summary = history_summary_from_config(
+                    &config,
+                    &child.name,
+                    Some(&workspace.name),
+                    Some(&child.name),
+                    file_type,
+                );
+                let files = summary.file_paths.len() as u32;
+                if files == 0 {
+                    continue;
+                }
+                files
+            }
+            (false, _) => 0,
         };
         record_auto_sync_history(
             config_path,
@@ -4343,10 +4443,25 @@ fn start_project_watcher(
         let mut suppress_until: Option<Instant> = None;
         let mut last_fingerprint = initial_fingerprint;
         while let Ok(batch) = rx.recv() {
+            let config = load_config(&config_path).unwrap_or_else(|_| fallback_config.clone());
+            let fingerprint = project_auto_sync_fingerprint(&config, &project_name, &peer_name);
             if suppress_until
                 .map(|until| Instant::now() < until)
                 .unwrap_or(false)
             {
+                if let Some(fingerprint) = fingerprint {
+                    app_log(
+                        "baseline_updated",
+                        &[
+                            ("scope", "project".to_string()),
+                            ("name", project_name.clone()),
+                            ("peer", peer_name.clone()),
+                            ("trigger", "watcher_cooldown".to_string()),
+                            ("hash", hash_prefix(&fingerprint)),
+                        ],
+                    );
+                    last_fingerprint = Some(fingerprint);
+                }
                 app_log(
                     "project_auto_sync_suppressed",
                     &[
@@ -4365,8 +4480,6 @@ fn start_project_watcher(
                     ("change_count", batch.changes.len().to_string()),
                 ],
             );
-            let config = load_config(&config_path).unwrap_or_else(|_| fallback_config.clone());
-            let fingerprint = project_auto_sync_fingerprint(&config, &project_name, &peer_name);
             if fingerprint.is_some() && fingerprint == last_fingerprint {
                 app_log(
                     "sync_fingerprint_gate_hit",
@@ -4424,6 +4537,9 @@ fn start_project_watcher(
             let Some(gate_key) =
                 try_begin_auto_sync("project", &project_name, &peer_name, "watcher")
             else {
+                if let Some(fingerprint) = fingerprint {
+                    last_fingerprint = Some(fingerprint);
+                }
                 continue;
             };
             match run_project_auto_sync(&config_path, &config, &project_name, &peer_name, None) {
@@ -4556,10 +4672,36 @@ fn start_workspace_watcher(
         let mut suppress_until: Option<Instant> = None;
         let mut last_fingerprint = initial_fingerprint;
         while let Ok(batch) = rx.recv() {
-            if suppress_until
-                .map(|until| Instant::now() < until)
-                .unwrap_or(false)
+            let config = load_config(&config_path).unwrap_or_else(|_| fallback_config.clone());
+            let Some(workspace) = config
+                .workspaces
+                .iter()
+                .find(|workspace| workspace.name == workspace_name)
+                .cloned()
+            else {
+                continue;
+            };
+            let peer_name = workspace.effective_peer().unwrap_or_default().to_string();
+            let bypass_pending = workspace_first_propagation_pending(&workspace_name, &peer_name);
+            let fingerprint = workspace_auto_sync_fingerprint(&config, &workspace);
+            if !bypass_pending
+                && suppress_until
+                    .map(|until| Instant::now() < until)
+                    .unwrap_or(false)
             {
+                if let Some(fingerprint) = fingerprint {
+                    app_log(
+                        "baseline_updated",
+                        &[
+                            ("scope", "workspace".to_string()),
+                            ("name", workspace_name.clone()),
+                            ("peer", peer_name.clone()),
+                            ("trigger", "watcher_cooldown".to_string()),
+                            ("hash", hash_prefix(&fingerprint)),
+                        ],
+                    );
+                    last_fingerprint = Some(fingerprint);
+                }
                 app_log(
                     "workspace_auto_sync_suppressed",
                     &[
@@ -4577,17 +4719,7 @@ fn start_workspace_watcher(
                     ("change_count", batch.changes.len().to_string()),
                 ],
             );
-            let config = load_config(&config_path).unwrap_or_else(|_| fallback_config.clone());
-            let Some(workspace) = config
-                .workspaces
-                .iter()
-                .find(|workspace| workspace.name == workspace_name)
-                .cloned()
-            else {
-                continue;
-            };
-            let fingerprint = workspace_auto_sync_fingerprint(&config, &workspace);
-            if fingerprint.is_some() && fingerprint == last_fingerprint {
+            if !bypass_pending && fingerprint.is_some() && fingerprint == last_fingerprint {
                 app_log(
                     "sync_fingerprint_gate_hit",
                     &[
@@ -4638,14 +4770,27 @@ fn start_workspace_watcher(
                 suppress_until = Some(Instant::now() + AUTO_SYNC_COOLDOWN);
                 continue;
             }
-            let peer_name = workspace.effective_peer().unwrap_or_default().to_string();
-            let Some(gate_key) =
+            let gate_key = if bypass_pending {
+                begin_auto_sync_bypass_cooldown(
+                    "workspace",
+                    &workspace_name,
+                    &peer_name,
+                    "new_child",
+                )
+            } else {
                 try_begin_auto_sync("workspace", &workspace_name, &peer_name, "watcher")
-            else {
+            };
+            let Some(gate_key) = gate_key else {
+                if let Some(fingerprint) = fingerprint {
+                    last_fingerprint = Some(fingerprint);
+                }
                 continue;
             };
-            match run_workspace_auto_sync(&config_path, &config, &workspace, None) {
-                Ok(report) => {
+            if bypass_pending {
+                clear_workspace_first_propagation(&workspace_name, &peer_name);
+            }
+            match run_workspace_auto_sync_outcome(&config_path, &config, &workspace, None) {
+                Ok(outcome) => {
                     let post_config = load_config(&config_path).unwrap_or_else(|_| config.clone());
                     if let Some(updated_workspace) = post_config
                         .workspaces
@@ -4668,8 +4813,9 @@ fn start_workspace_watcher(
                             last_fingerprint = Some(post_fingerprint);
                         }
                     }
-                    let files =
-                        (report.code_files_transferred + report.session_files_transferred) as u32;
+                    let files = (outcome.report.code_files_transferred
+                        + outcome.report.session_files_transferred)
+                        as u32;
                     record_auto_sync_history(
                         &config_path,
                         &workspace_name,
@@ -4682,10 +4828,11 @@ fn start_workspace_watcher(
                     );
                     record_auto_workspace_child_history(
                         &config_path,
-                        &workspace,
+                        &outcome.workspace,
                         true,
                         None,
                         "mixed",
+                        Some(&outcome.child_file_counts),
                     );
                     app_log(
                         "workspace_auto_sync_complete",
@@ -4713,6 +4860,7 @@ fn start_workspace_watcher(
                         false,
                         Some(&detail),
                         "mixed",
+                        None,
                     );
                     app_log(
                         "workspace_auto_sync_failed",
@@ -4756,6 +4904,7 @@ fn refresh_workspaces_in_config(config: &SyncConfig) -> (SyncConfig, bool) {
             .unwrap_or_else(|| workspace.remote_root.clone());
         match refresh_workspace_children(workspace, &remote_root) {
             Ok(next) => {
+                let mut queue_first_propagation = false;
                 if next.children != workspace.children {
                     for child in &next.children {
                         if !workspace.children.iter().any(|old| old.name == child.name) {
@@ -4769,6 +4918,7 @@ fn refresh_workspaces_in_config(config: &SyncConfig) -> (SyncConfig, bool) {
                                 ],
                             );
                             if child.enabled {
+                                queue_first_propagation = true;
                                 app_log(
                                     "workspace_child_auto_enabled",
                                     &[
@@ -4787,6 +4937,9 @@ fn refresh_workspaces_in_config(config: &SyncConfig) -> (SyncConfig, bool) {
                         ],
                     );
                     changed = true;
+                }
+                if queue_first_propagation {
+                    enqueue_workspace_first_propagation(&next);
                 }
                 refreshed.push(next);
             }
@@ -4918,7 +5071,10 @@ fn session_target_key(target: &SessionMtimeTarget) -> String {
 }
 
 fn session_sync_key(target: &SessionMtimeTarget) -> String {
-    auto_sync_gate_key(target.scope, &target.name, &target.peer)
+    format!(
+        "{}:{}:{}:{}",
+        target.scope, target.name, target.peer, target.tool
+    )
 }
 
 fn session_seed_key(config_path: &Path, target_key: &str) -> String {
@@ -5017,6 +5173,103 @@ fn seed_session_baselines_for_workspace(
     }
 }
 
+fn run_pending_workspace_first_propagations(config_path: &Path, config: &SyncConfig) {
+    for workspace in &config.workspaces {
+        if !workspace.enabled {
+            continue;
+        }
+        let Some(peer_name) = workspace.effective_peer().map(str::to_string) else {
+            continue;
+        };
+        if !workspace_first_propagation_pending(&workspace.name, &peer_name) {
+            continue;
+        }
+        let Some(gate_key) =
+            begin_auto_sync_bypass_cooldown("workspace", &workspace.name, &peer_name, "new_child")
+        else {
+            continue;
+        };
+        clear_workspace_first_propagation(&workspace.name, &peer_name);
+        app_log(
+            "workspace_first_propagation_started",
+            &[
+                ("workspace", workspace.name.clone()),
+                ("peer", peer_name.clone()),
+                ("trigger", "new_child".to_string()),
+            ],
+        );
+        match run_workspace_auto_sync_outcome(config_path, config, workspace, None) {
+            Ok(outcome) => {
+                let files = (outcome.report.code_files_transferred
+                    + outcome.report.session_files_transferred) as u32;
+                record_auto_sync_history(
+                    config_path,
+                    &workspace.name,
+                    true,
+                    files,
+                    None,
+                    Some(&workspace.name),
+                    None,
+                    "mixed",
+                );
+                record_auto_workspace_child_history(
+                    config_path,
+                    &outcome.workspace,
+                    true,
+                    None,
+                    "mixed",
+                    Some(&outcome.child_file_counts),
+                );
+                let post_config = load_config(config_path).unwrap_or_else(|_| config.clone());
+                seed_session_baselines_for_workspace(
+                    config_path,
+                    &post_config,
+                    &workspace.name,
+                    &peer_name,
+                );
+                app_log(
+                    "workspace_first_propagation_complete",
+                    &[
+                        ("workspace", workspace.name.clone()),
+                        ("peer", peer_name.clone()),
+                        ("file_count", files.to_string()),
+                    ],
+                );
+            }
+            Err(error) => {
+                let detail = error.to_string();
+                record_auto_sync_history(
+                    config_path,
+                    &workspace.name,
+                    false,
+                    0,
+                    Some(detail.clone()),
+                    Some(&workspace.name),
+                    None,
+                    "mixed",
+                );
+                record_auto_workspace_child_history(
+                    config_path,
+                    workspace,
+                    false,
+                    Some(&detail),
+                    "mixed",
+                    None,
+                );
+                app_log(
+                    "workspace_first_propagation_failed",
+                    &[
+                        ("workspace", workspace.name.clone()),
+                        ("peer", peer_name.clone()),
+                        ("error", detail),
+                    ],
+                );
+            }
+        }
+        finish_auto_sync(&gate_key);
+    }
+}
+
 fn start_session_mtime_scanner(config_path: PathBuf, fallback_config: SyncConfig) {
     std::thread::spawn(move || {
         let mut seen = HashMap::<String, SystemTime>::new();
@@ -5027,6 +5280,7 @@ fn start_session_mtime_scanner(config_path: PathBuf, fallback_config: SyncConfig
             if let Some(refreshed_config) = refresh_and_save_workspaces(&config_path) {
                 config = refreshed_config;
             }
+            run_pending_workspace_first_propagations(&config_path, &config);
             let interval_secs = refresh_interval_secs(&config);
             let targets = session_mtime_targets(&config);
             app_log(
@@ -5167,7 +5421,8 @@ fn start_session_mtime_scanner(config_path: PathBuf, fallback_config: SyncConfig
                     ],
                 );
 
-                if !triggered.insert(sync_key) {
+                let trigger_key = auto_sync_gate_key(target.scope, &target.name, &target.peer);
+                if !triggered.insert(trigger_key) {
                     continue;
                 }
 
@@ -5207,14 +5462,16 @@ fn start_session_mtime_scanner(config_path: PathBuf, fallback_config: SyncConfig
                             ))
                         })
                         .and_then(|workspace| {
-                            run_workspace_auto_sync(&config_path, &config, &workspace, None)
+                            run_workspace_auto_sync_outcome(&config_path, &config, &workspace, None)
+                                .map(|outcome| (outcome.report, Some(outcome.child_file_counts)))
                         })
                 } else {
                     run_project_auto_sync(&config_path, &config, &target.name, &target.peer, None)
+                        .map(|report| (report, None))
                 };
 
                 match result {
-                    Ok(report) => {
+                    Ok((report, child_file_counts)) => {
                         let scan_limit = if target.tool == "codex" { 32 } else { 256 };
                         if let Some(post_mtime) = latest_mtime_limited(&target.path, scan_limit) {
                             let post_config =
@@ -5252,6 +5509,7 @@ fn start_session_mtime_scanner(config_path: PathBuf, fallback_config: SyncConfig
                                 true,
                                 None,
                                 "session",
+                                child_file_counts.as_ref(),
                             );
                         }
                         app_log(
@@ -5285,6 +5543,7 @@ fn start_session_mtime_scanner(config_path: PathBuf, fallback_config: SyncConfig
                                 false,
                                 Some(&detail),
                                 "session",
+                                None,
                             );
                         }
                         app_log(
@@ -5571,6 +5830,37 @@ fn project_auto_sync_fingerprint(
     Some(hasher.finalize().to_hex().to_string())
 }
 
+fn workspace_local_session_roots(workspace: &WorkspaceConfig) -> Vec<PathBuf> {
+    let root = workspace.effective_local_root();
+    let mut roots = vec![root.to_path_buf()];
+    if let Ok(entries) = fs::read_dir(root) {
+        for entry in entries.flatten() {
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if !file_type.is_dir() {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if !name.starts_with('.') {
+                roots.push(entry.path());
+            }
+        }
+    }
+    roots.extend(
+        workspace
+            .children
+            .iter()
+            .map(|child| child.local_dir.clone()),
+    );
+    roots.sort();
+    let mut seen = HashSet::new();
+    roots
+        .into_iter()
+        .filter(|path| seen.insert(path.clone()))
+        .collect()
+}
+
 fn workspace_auto_sync_fingerprint(
     config: &SyncConfig,
     workspace: &WorkspaceConfig,
@@ -5578,26 +5868,11 @@ fn workspace_auto_sync_fingerprint(
     if !workspace.enabled {
         return None;
     }
-    let peer_name = workspace.effective_peer().unwrap_or_default();
-    let remote_root = workspace
-        .effective_remote_root(peer_name)
-        .unwrap_or_else(|| workspace.remote_root.clone());
-    let refreshed = refresh_workspace_children(workspace, &remote_root).ok()?;
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"workspace");
-    hasher.update(refreshed.name.as_bytes());
-    for child in &refreshed.children {
-        hasher.update(child.name.as_bytes());
-        hasher.update(&[child.enabled as u8, child.conflicted as u8]);
-    }
-    hash_tree_contents(&mut hasher, "code", refreshed.effective_local_root(), 16384);
-    let mut roots = vec![refreshed.effective_local_root().to_path_buf()];
-    roots.extend(
-        refreshed
-            .children
-            .iter()
-            .map(|child| child.local_dir.clone()),
-    );
+    hasher.update(workspace.name.as_bytes());
+    hash_tree_contents(&mut hasher, "code", workspace.effective_local_root(), 16384);
+    let roots = workspace_local_session_roots(workspace);
     for path in claude_mtime_paths(config, &roots) {
         hash_tree_contents(&mut hasher, "claude", &path, 4096);
     }
@@ -5643,39 +5918,19 @@ fn workspace_sync_fingerprint_for_target(
         .workspaces
         .iter()
         .find(|workspace| workspace.name == target.name && workspace.enabled)?;
-    let peer_name = workspace.effective_peer().unwrap_or_default();
-    let remote_root = workspace
-        .effective_remote_root(peer_name)
-        .unwrap_or_else(|| workspace.remote_root.clone());
-    let refreshed = refresh_workspace_children(workspace, &remote_root).ok()?;
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"workspace-sync");
-    hasher.update(refreshed.name.as_bytes());
+    hasher.update(workspace.name.as_bytes());
     hasher.update(target.peer.as_bytes());
-    for child in &refreshed.children {
-        hasher.update(child.name.as_bytes());
-        hasher.update(&[child.enabled as u8, child.conflicted as u8]);
-    }
-    hash_tree_contents(&mut hasher, "code", refreshed.effective_local_root(), 16384);
-    let mut roots = vec![refreshed.effective_local_root().to_path_buf()];
-    roots.extend(
-        refreshed
-            .children
-            .iter()
-            .map(|child| child.local_dir.clone()),
-    );
+    hash_tree_contents(&mut hasher, "code", workspace.effective_local_root(), 16384);
+    let roots = workspace_local_session_roots(workspace);
     for path in claude_mtime_paths(config, &roots) {
         hash_tree_contents(&mut hasher, "claude", &path, 4096);
     }
     if target.tool == "codex" {
-        let excluded = refreshed
-            .children
-            .iter()
-            .filter(|child| child.conflicted || !child.enabled)
-            .map(|child| child.name.clone())
-            .collect::<HashSet<_>>();
+        let excluded = HashSet::<String>::new();
         hash_codex_sessions_matching(&mut hasher, "codex", |file| {
-            codex_session_file_matches_workspace(file, refreshed.effective_local_root(), &excluded)
+            codex_session_file_matches_workspace(file, workspace.effective_local_root(), &excluded)
         });
     }
     Some(hasher.finalize().to_hex().to_string())
@@ -5798,15 +6053,15 @@ fn run_project_auto_sync(
     run_tcp_push(config_path, config, peer_name, &project, live_connection)
 }
 
-fn run_workspace_auto_sync(
+fn run_workspace_auto_sync_outcome(
     config_path: &Path,
     config: &SyncConfig,
     workspace: &WorkspaceConfig,
     live_connection: Option<PeerConnectionInfo>,
-) -> Result<SyncReport> {
+) -> Result<WorkspaceSyncOutcome> {
     let outcome = run_workspace_tcp_push(config_path, config, workspace, live_connection)?;
     let mut updated = config.clone();
-    replace_workspace(&mut updated, outcome.workspace);
+    replace_workspace(&mut updated, outcome.workspace.clone());
     save_config(config_path, &updated)?;
     app_log(
         "workspace_children_persisted",
@@ -5815,7 +6070,7 @@ fn run_workspace_auto_sync(
             ("config", config_path.display().to_string()),
         ],
     );
-    Ok(outcome.report)
+    Ok(outcome)
 }
 
 fn run_tcp_push(
@@ -5935,6 +6190,15 @@ fn run_tcp_push(
 struct WorkspaceSyncOutcome {
     report: SyncReport,
     workspace: WorkspaceConfig,
+    child_file_counts: HashMap<String, u32>,
+}
+
+fn increment_child_file_count(counts: &mut HashMap<String, u32>, child_name: &str, files: usize) {
+    if files == 0 {
+        return;
+    }
+    let entry = counts.entry(child_name.to_string()).or_insert(0);
+    *entry = entry.saturating_add(files as u32);
 }
 
 fn run_workspace_tcp_push(
@@ -5970,6 +6234,16 @@ fn run_workspace_tcp_push(
         .children
         .iter()
         .map(|child| child.name.clone())
+        .collect();
+    let previous_child_fingerprints: HashMap<String, String> = workspace
+        .children
+        .iter()
+        .filter_map(|child| {
+            child
+                .last_fingerprint
+                .as_ref()
+                .map(|fingerprint| (child.name.clone(), fingerprint.clone()))
+        })
         .collect();
     let workspace = refresh_workspace_children(workspace, &remote_root)?;
     for child in &workspace.children {
@@ -6042,7 +6316,7 @@ fn run_workspace_tcp_push(
             .await
     });
 
-    let (code_files, workspace, conflicted_children) = match code_result {
+    let (code_files, workspace, conflicted_children, mut child_file_counts) = match code_result {
         Ok(exchange) => {
             let analysis = analysis_slot.lock().unwrap().take().unwrap_or_else(|| {
                 analyze_workspace_conflicts(
@@ -6051,10 +6325,26 @@ fn run_workspace_tcp_push(
                     &exchange.remote_manifest,
                 )
             });
+            let mut child_file_counts = HashMap::new();
+            for child in &analysis.workspace.children {
+                if !child.enabled || child.conflicted {
+                    continue;
+                }
+                let local = child_manifest(&exchange.source_manifest, &child.name);
+                let local_fingerprint = manifest_fingerprint(&local);
+                if previous_child_fingerprints.get(&child.name) != Some(&local_fingerprint) {
+                    increment_child_file_count(
+                        &mut child_file_counts,
+                        &child.name,
+                        local.files.len(),
+                    );
+                }
+            }
             (
                 exchange.source_manifest.files.len(),
                 analysis.workspace,
                 Vec::new(),
+                child_file_counts,
             )
         }
         Err(error) => {
@@ -6074,8 +6364,9 @@ fn run_workspace_tcp_push(
                     ],
                 );
             }
-            let code_files = runtime.block_on(async {
+            let (code_files, child_file_counts) = runtime.block_on(async {
                 let mut transferred = 0usize;
+                let mut child_file_counts = HashMap::new();
                 for child in &analysis.safe_children {
                     let identity = generate_tls_identity("aisync-client")?;
                     let tls = TlsConfig::new(identity, connection.server_name.clone())
@@ -6090,10 +6381,20 @@ fn run_workspace_tcp_push(
                         .sync_directory_to(&child.local_dir, Some(&child.remote_dir), None)
                         .await?;
                     transferred += manifest.files.len();
+                    increment_child_file_count(
+                        &mut child_file_counts,
+                        &child.name,
+                        manifest.files.len(),
+                    );
                 }
-                Ok::<_, AisyncError>(transferred)
+                Ok::<_, AisyncError>((transferred, child_file_counts))
             })?;
-            (code_files, analysis.workspace, analysis.conflicted_children)
+            (
+                code_files,
+                analysis.workspace,
+                analysis.conflicted_children,
+                child_file_counts,
+            )
         }
     };
 
@@ -6170,6 +6471,9 @@ fn run_workspace_tcp_push(
                     .await?;
                 plan_files += manifest.files.len();
             }
+            for (child_name, files) in &plan.child_file_counts {
+                increment_child_file_count(&mut child_file_counts, child_name, *files as usize);
+            }
             counts.push(plan_files);
         }
 
@@ -6245,6 +6549,7 @@ fn run_workspace_tcp_push(
             ],
         },
         workspace,
+        child_file_counts,
     })
 }
 
@@ -6261,6 +6566,7 @@ struct WorkspaceSessionSyncPlan {
     staging_root: PathBuf,
     remote_projects_dir: PathBuf,
     transfers: Vec<WorkspaceSessionTransfer>,
+    child_file_counts: HashMap<String, u32>,
     bytes: u64,
     rewritten_sessions: usize,
 }
@@ -6619,6 +6925,7 @@ fn prepare_claude_workspace_session_sync(
     let mut unchanged = 0usize;
     let mut applied = 0usize;
     let mut skipped = 0usize;
+    let mut child_file_counts = HashMap::new();
     for session in &mut sessions {
         let report = ClaudeCodeParser::rewrite_structured_paths(
             session,
@@ -6632,6 +6939,11 @@ fn prepare_claude_workspace_session_sync(
         }
         applied += report.applied.len();
         skipped += report.skipped.len();
+        let child_name =
+            session_child_name(&session.original_project_path, &project.local_code_dir);
+        if let Some(child_name) = &child_name {
+            increment_child_file_count(&mut child_file_counts, child_name, 1);
+        }
         session.encoded_dir_name =
             claude_project_dir_name(Path::new(&session.original_project_path));
         ClaudeCodeParser::write_session(session, &staged_projects_dir)?;
@@ -6671,6 +6983,7 @@ fn prepare_claude_workspace_session_sync(
         staging_root,
         remote_projects_dir,
         transfers,
+        child_file_counts,
         bytes,
         rewritten_sessions: changed,
     }))
@@ -6700,10 +7013,16 @@ fn prepare_codex_workspace_session_sync(
     let mut files = Vec::new();
     collect_jsonl_files(&local_sessions_dir, &mut files)?;
     let mut selected = Vec::new();
+    let mut child_file_counts = HashMap::new();
     for file in files {
         if !codex_session_file_matches_workspace(&file, &project.local_code_dir, excluded_children)
         {
             continue;
+        }
+        if let Some(child_name) =
+            codex_session_child_name(&file, &project.local_code_dir, excluded_children)
+        {
+            increment_child_file_count(&mut child_file_counts, &child_name, 1);
         }
         selected.push(file);
     }
@@ -6781,6 +7100,7 @@ fn prepare_codex_workspace_session_sync(
             staged_dir: staged_sessions_dir,
             remote_dir: remote_sessions_dir,
         }],
+        child_file_counts,
         bytes,
         rewritten_sessions: 0,
     }))
@@ -6850,6 +7170,26 @@ fn codex_session_file_matches_workspace(
             .iter()
             .any(|child_path| line.contains(child_path))
     })
+}
+
+fn codex_session_child_name(
+    file: &Path,
+    local_root: &Path,
+    excluded_children: &HashSet<String>,
+) -> Option<String> {
+    let child_names = first_level_dir_names(local_root).ok()?;
+    let mut candidates: Vec<String> = child_names
+        .into_iter()
+        .filter(|name| !excluded_children.contains(name))
+        .collect();
+    candidates.sort();
+    for child_name in candidates {
+        let child_path = local_root.join(&child_name).to_string_lossy().into_owned();
+        if file_contains(file, |line| line.contains(&child_path)) {
+            return Some(child_name);
+        }
+    }
+    None
 }
 
 fn file_contains(file: &Path, mut predicate: impl FnMut(&str) -> bool) -> bool {
@@ -8099,6 +8439,62 @@ mod tests {
     }
 
     #[test]
+    fn session_sync_key_includes_tool_dimension() {
+        let target = SessionMtimeTarget {
+            scope: "workspace",
+            name: "workspace".to_string(),
+            peer: "peer".to_string(),
+            tool: "claude",
+            path: PathBuf::from("/tmp/claude"),
+        };
+        let mut codex = target.clone();
+        codex.tool = "codex";
+
+        assert_ne!(session_sync_key(&target), session_sync_key(&codex));
+    }
+
+    #[test]
+    fn workspace_auto_fingerprint_ignores_child_status_metadata() {
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace_root = tmp.path().join("workspace");
+        let remote_root = tmp.path().join("remote");
+        let child_dir = workspace_root.join("app");
+        fs::create_dir_all(&child_dir).unwrap();
+        fs::write(child_dir.join("main.rs"), b"fn main() {}\n").unwrap();
+        let child = WorkspaceChildConfig {
+            name: "app".to_string(),
+            local_dir: child_dir,
+            remote_dir: remote_root.join("app"),
+            enabled: true,
+            conflicted: false,
+            last_fingerprint: Some("old".to_string()),
+        };
+        let mut workspace = WorkspaceConfig {
+            name: "workspace".to_string(),
+            local_root: workspace_root.clone(),
+            remote_root,
+            peer: "peer".to_string(),
+            children: vec![child],
+            local: workspace_root,
+            peers: HashMap::new(),
+            scan_depth: 1,
+            auto_enable_new: true,
+            sync_mode: SyncModeConfig::TwoWayAuto,
+            enabled: true,
+            exclude_rules: Vec::new(),
+        };
+        let config = SyncConfig::new("local");
+        let initial = workspace_auto_sync_fingerprint(&config, &workspace).unwrap();
+
+        workspace.children[0].enabled = false;
+        workspace.children[0].conflicted = true;
+        workspace.children[0].last_fingerprint = Some("new".to_string());
+        let metadata_changed = workspace_auto_sync_fingerprint(&config, &workspace).unwrap();
+
+        assert_eq!(initial, metadata_changed);
+    }
+
+    #[test]
     fn record_auto_sync_history_creates_history_file() {
         let tmp = tempfile::tempdir().unwrap();
         let config_path = tmp.path().join("config.toml");
@@ -8147,6 +8543,76 @@ mod tests {
             .is_some_and(|paths| paths
                 .iter()
                 .any(|path| path.as_str().unwrap_or_default().ends_with("main.rs"))));
+    }
+
+    #[test]
+    fn workspace_child_history_uses_transferred_child_counts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join("config.toml");
+        let local_root = tmp.path().join("workspace");
+        let remote_root = tmp.path().join("remote");
+        let child_a = local_root.join("a");
+        let child_b = local_root.join("b");
+        fs::create_dir_all(&child_a).unwrap();
+        fs::create_dir_all(&child_b).unwrap();
+        fs::write(child_a.join("main.rs"), b"fn main() {}\n").unwrap();
+
+        let workspace = WorkspaceConfig {
+            name: "workspace".to_string(),
+            local_root: local_root.clone(),
+            remote_root: remote_root.clone(),
+            peer: "peer".to_string(),
+            children: vec![
+                WorkspaceChildConfig {
+                    name: "a".to_string(),
+                    local_dir: child_a,
+                    remote_dir: remote_root.join("a"),
+                    enabled: true,
+                    conflicted: false,
+                    last_fingerprint: None,
+                },
+                WorkspaceChildConfig {
+                    name: "b".to_string(),
+                    local_dir: child_b,
+                    remote_dir: remote_root.join("b"),
+                    enabled: true,
+                    conflicted: false,
+                    last_fingerprint: None,
+                },
+            ],
+            local: local_root,
+            peers: HashMap::new(),
+            scan_depth: 1,
+            auto_enable_new: true,
+            sync_mode: SyncModeConfig::TwoWayAuto,
+            enabled: true,
+            exclude_rules: Vec::new(),
+        };
+        let mut config = SyncConfig::new("local");
+        config.state_path = Some(tmp.path().join("state.toml"));
+        config.workspaces.push(workspace.clone());
+        save_config(&config_path, &config).unwrap();
+        let counts = HashMap::from([("a".to_string(), 2), ("b".to_string(), 0)]);
+
+        record_auto_workspace_child_history(
+            &config_path,
+            &workspace,
+            true,
+            None,
+            "mixed",
+            Some(&counts),
+        );
+
+        let rows = read_jsonl(&tmp.path().join("history.jsonl"));
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].get("projectId").and_then(|value| value.as_str()),
+            Some("a")
+        );
+        assert_eq!(
+            rows[0].get("files").and_then(|value| value.as_u64()),
+            Some(2)
+        );
     }
 
     #[test]

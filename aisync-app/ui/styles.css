@@ -1176,8 +1176,10 @@ select.pill {
 }
 .chat-msg .copy-btn {
   position: absolute;
-  top: -8px;
-  right: -8px;
+  /* ISS-031 真根因：原 top/right:-8px 让按钮外扩出气泡 8px，被计入父容器
+     scrollWidth（与日志 overflow=8px 精确吻合）。内移到气泡内，不再外扩。 */
+  top: 4px;
+  right: 4px;
   border: 1px solid var(--border-strong);
   background: var(--bg-active);
   color: var(--text-2);
