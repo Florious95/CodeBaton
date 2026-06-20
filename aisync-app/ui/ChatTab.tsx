@@ -23,7 +23,7 @@ const BUBBLE_STYLE: React.CSSProperties = {
  * 模块顶层组件，避免父级 3s 轮询重渲染时被卸载重建。
  */
 export function ChatTab({ peerName, online }: { peerName: string; online: boolean }) {
-  const { chatByPeer, sendChat, clearUnread } = useStore();
+  const { chatByPeer, sendChat, clearUnread, t } = useStore();
   const messages = chatByPeer[peerName] ?? [];
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
@@ -64,7 +64,7 @@ export function ChatTab({ peerName, online }: { peerName: string; online: boolea
       await sendChat(peerName, content);
       setDraft("");
     } catch (e) {
-      pushToast(`发送失败：${String(e)}`);
+      pushToast(t.sendFailed(String(e)));
     } finally {
       setSending(false);
     }
@@ -75,7 +75,7 @@ export function ChatTab({ peerName, online }: { peerName: string; online: boolea
       <div className="chat-log" ref={scrollRef}>
         {messages.length === 0 ? (
           <p className="faint" style={{ fontSize: 12, textAlign: "center", padding: 20 }}>
-            还没有消息。在下方输入框给 {peerName} 发条消息吧。
+            {t.chatEmpty(peerName)}
           </p>
         ) : (
           messages.map((m, i) => (
@@ -84,17 +84,17 @@ export function ChatTab({ peerName, online }: { peerName: string; online: boolea
                 <span className="text" style={{ display: "block", maxWidth: "100%", wordBreak: "break-all", overflowWrap: "anywhere" }}>{m.content}</span>
                 <button
                   className="copy-btn"
-                  title="复制"
+                  title={t.copy}
                   onClick={() => {
                     navigator.clipboard?.writeText(m.content);
-                    pushToast("已复制");
+                    pushToast(t.copied);
                   }}
                 >
                   <Copy size={12} />
                 </button>
               </div>
               <span className="meta faint">
-                {m.mine ? "我" : m.senderName} · {fmtTime(String(m.timestamp))}
+                {m.mine ? t.me : m.senderName} · {fmtTime(String(m.timestamp))}
               </span>
             </div>
           ))
@@ -104,7 +104,7 @@ export function ChatTab({ peerName, online }: { peerName: string; online: boolea
         <textarea
           rows={2}
           value={draft}
-          placeholder={online ? "输入消息，Enter 发送（Shift+Enter 换行）" : "对端离线"}
+          placeholder={online ? t.chatPlaceholder : t.peerOffline}
           disabled={!online}
           onChange={(e) => setDraft(e.target.value)}
           onKeyDown={(e) => {
@@ -115,7 +115,7 @@ export function ChatTab({ peerName, online }: { peerName: string; online: boolea
           }}
         />
         <button className="primary" disabled={!online || !draft.trim() || sending} onClick={send}>
-          发送
+          {t.send}
         </button>
       </div>
     </div>

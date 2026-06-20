@@ -1,5 +1,5 @@
 /* Design tokens — exact values from the Claude Design prototype
-   (frontend-demo/AISync.dc.html). Do not drift from these. */
+   (frontend-demo/CodeBaton.dc.html). Do not drift from these. */
 :root {
   --bg: #1a1a1d;            /* main content bg */
   --bg-elevated: #1e1e22;   /* card bg */
@@ -237,7 +237,7 @@ select.pill {
   height: 100%;
 }
 
-/* Title bar (prototype §1): centered green logo + "AISync", lang toggle right. */
+/* Title bar (prototype §1): centered green logo + "CodeBaton", lang toggle right. */
 .titlebar {
   grid-area: titlebar;
   height: 40px;
@@ -592,7 +592,7 @@ select.pill {
 .proj-detail {
   border-top: 1px solid var(--border-line);
   padding: 16px;
-  background: #191a1d;
+  background: var(--bg);
 }
 /* Read-only select-like chip (sync mode / target tool in detail grid). */
 .chip {
@@ -821,12 +821,29 @@ select.pill {
 .history-row {
   display: grid;
   /* time | project | direction | 手动/自动 | 成/败 | detail */
-  grid-template-columns: 130px 1fr auto auto auto auto;
+  grid-template-columns: 130px minmax(0, 1fr) auto auto auto auto;
   gap: 12px;
   font-size: 11px;
   padding: 5px 0;
   font-family: "SF Mono", "Menlo", monospace;
   border-bottom: 1px solid var(--border);
+}
+/* ISS-629: 项目名列中文逐字换行 → 截断省略 */
+.history-row > span:nth-child(2) {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+/* ProjectCard 最近同步：5 列（time | 方向+peer | 成败 | 文件数 | 字节），
+   与 PeerDetail 的 6 列结构不同，单独定列宽并右对齐数值列以对齐。 */
+.pc-history-row {
+  grid-template-columns: 130px minmax(0, 1fr) 56px 72px 72px;
+}
+.pc-history-row > span:nth-child(4),
+.pc-history-row > span:nth-child(5) {
+  text-align: right;
+  white-space: nowrap;
 }
 .history-row .ok {
   color: var(--accent);
@@ -891,7 +908,7 @@ select.pill {
   margin-top: 4px;
 }
 .radio {
-  display: flex;
+  display: flex !important;
   align-items: center;
   gap: 10px;
   padding: 6px 0;
@@ -934,7 +951,7 @@ select.pill {
   background: var(--accent);
 }
 .check {
-  display: flex;
+  display: flex !important;
   align-items: center;
   gap: 10px;
   padding: 5px 0;

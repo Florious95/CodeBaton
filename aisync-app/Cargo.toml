@@ -2,15 +2,15 @@
 name = "aisync-app"
 edition.workspace = true
 version.workspace = true
-description = "AISync desktop application (Tauri v2)"
-default-run = "aisync-app"
+description = "CodeBaton desktop application (Tauri v2)"
+default-run = "codebaton"
 
 [lib]
 name = "aisync_app_lib"
 path = "src/lib.rs"
 
 [[bin]]
-name = "aisync-app"
+name = "codebaton"
 path = "src/main.rs"
 
 [build-dependencies]

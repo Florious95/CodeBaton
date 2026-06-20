@@ -12,7 +12,7 @@ import { useShortcuts } from "./shortcuts";
 import { pushToast, useStore } from "./store";
 
 export function App() {
-  const { view, dialog, setDialog, toast, syncProgress, lang, setLang, refresh, theme, setTheme } =
+  const { view, dialog, setDialog, toast, syncProgress, lang, setLang, refresh, theme, setTheme, t } =
     useStore();
   useShortcuts();
   useNotifications();
@@ -62,11 +62,15 @@ export function App() {
         );
         if (
           window.confirm(
-            `${fileRequest.senderName} 想发送文件：${fileRequest.filename}\n\n保存到：${fileRequest.suggestedPath}`,
+            t.fileReceiveConfirm(
+              fileRequest.senderName,
+              fileRequest.filename,
+              fileRequest.suggestedPath,
+            ),
           )
         ) {
           await ipc.confirmFileTransferRequest(fileRequest.transferId, fileRequest.suggestedPath);
-          pushToast("已确认文件接收");
+          pushToast(t.fileReceiveConfirmed);
         }
       } catch {
         // Polling is best-effort; receiver logs carry detailed backend errors.
@@ -78,7 +82,7 @@ export function App() {
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [dialog, setDialog]);
+  }, [dialog, setDialog, t]);
 
   useEffect(() => {
     if (!ipc.inTauri()) return;
@@ -90,7 +94,7 @@ export function App() {
           if (cancelled || count <= 0) return;
           ipc.uiLog(`project_mapping_acks_applied count=${count}`);
           await refresh();
-          pushToast("项目映射已确认");
+          pushToast(t.projMapAckd);
         })
         .catch((e) => ipc.uiLog(`project_mapping_ack_poll_failed error=${String(e)}`));
       ipc
@@ -99,7 +103,7 @@ export function App() {
           if (cancelled || count <= 0) return;
           ipc.uiLog(`workspace_mapping_acks_applied count=${count}`);
           await refresh();
-          pushToast("工作区映射已确认");
+          pushToast(t.wsMapAckd);
         })
         .catch((e) => ipc.uiLog(`workspace_mapping_ack_poll_failed error=${String(e)}`));
       ipc
@@ -107,7 +111,7 @@ export function App() {
         .then((count) => {
           if (cancelled || count <= 0) return;
           ipc.uiLog(`file_transfer_acks_applied count=${count}`);
-          pushToast("文件已发送");
+          pushToast(t.fileSentToast);
         })
         .catch((e) => ipc.uiLog(`file_transfer_ack_poll_failed error=${String(e)}`));
       // ISS-022: 文本消息的唯一消费者已移到全局 store（store.tsx 轮询
@@ -120,7 +124,7 @@ export function App() {
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [refresh]);
+  }, [refresh, t]);
 
   return (
     <>
@@ -147,24 +151,24 @@ export function App() {
           </div>
           {/* ISS-033: 标题栏右上角 主题切换（暗/亮/跟随系统）+ 语言切换 */}
           <div className="titlebar-right">
-            <div className="seg-toggle theme-toggle" title="主题">
+            <div className="seg-toggle theme-toggle" title={t.theme}>
               <button
                 className={theme === "dark" ? "on" : ""}
-                title="暗色"
+                title={t.themeDark}
                 onClick={() => setTheme("dark")}
               >
                 <Moon size={13} />
               </button>
               <button
                 className={theme === "light" ? "on" : ""}
-                title="亮色"
+                title={t.themeLight}
                 onClick={() => setTheme("light")}
               >
                 <Sun size={13} />
               </button>
               <button
                 className={theme === "system" ? "on" : ""}
-                title="跟随系统"
+                title={t.themeSystem}
                 onClick={() => setTheme("system")}
               >
                 <Monitor size={13} />
@@ -185,7 +189,7 @@ export function App() {
           {!ipc.inTauri() && (
             <div className="banner">
               <AlertCircle size={14} />
-              浏览器预览模式，后端 IPC 不可用 — 请用 npm run tauri dev 启动。
+              {t.browserPreview}
             </div>
           )}
           {view.page === "overview" && <OverviewPage />}
@@ -213,6 +217,9 @@ export function App() {
             fontSize: 12,
             zIndex: 200,
             boxShadow: "var(--shadow)",
+            maxWidth: "min(420px, 90vw)",
+            overflow: "hidden",
+            wordBreak: "break-all" as const,
           }}
         >
           {toast}

@@ -11,6 +11,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
+use std::future::Future;
 use std::io::{BufRead, BufReader, Read};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
@@ -319,7 +320,7 @@ impl Backend {
         };
         let mut changed = !existed;
         // Heal a stale/placeholder device name left by an older build (BUG-007).
-        // Earlier versions persisted the literal "AISync Device" because the
+        // Earlier versions persisted the literal "CodeBaton Device" because the
         // subprocess hostname lookup failed in the release sandbox; now that we
         // read the hostname in-process, re-derive a real name on next launch.
         if is_placeholder_device_name(&config.device.name) {
@@ -2061,6 +2062,30 @@ impl Backend {
         Ok(())
     }
 
+    pub fn delete_project(&self, project_name: &str) -> Result<()> {
+        let mut g = self.inner.lock().unwrap();
+        let mut candidate = g.config.clone();
+        let original_len = candidate.projects.len();
+        candidate
+            .projects
+            .retain(|project| project.name != project_name);
+        if candidate.projects.len() == original_len {
+            return Err(AisyncError::Config(format!(
+                "project '{project_name}' not found"
+            )));
+        }
+
+        let path = g.config_path.clone();
+        save_config(&path, &candidate)?;
+        g.config = candidate;
+        g.project_watchers.remove(project_name);
+        app_log(
+            "project_mapping_deleted",
+            &[("project", project_name.to_string())],
+        );
+        Ok(())
+    }
+
     pub fn add_workspace(
         &self,
         name: String,
@@ -2812,17 +2837,29 @@ fn send_pairing_request_async(
     });
 }
 
+fn run_control_future<F, Fut>(name: &'static str, build: F) -> Result<()>
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: Future<Output = Result<()>> + Send + 'static,
+{
+    std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .map_err(|error| AisyncError::Transport(format!("tokio runtime: {error}")))?;
+        runtime.block_on(build())
+    })
+    .join()
+    .map_err(|_| AisyncError::Transport(format!("{name} sender thread panicked")))?
+}
+
 fn send_project_mapping_request(
     endpoint: SocketAddr,
     tls: TlsConfig,
     request: ProjectMappingRequestPayload,
 ) -> Result<()> {
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(2)
-        .enable_all()
-        .build()
-        .map_err(|error| AisyncError::Transport(format!("tokio runtime: {error}")))?;
-    runtime.block_on(async move {
+    run_control_future("send_project_mapping_request", move || async move {
         let mut client = TcpTransporter::connect_addr(endpoint, &tls).await?;
         client.send_project_mapping_request(request).await
     })
@@ -2833,12 +2870,7 @@ fn send_project_mapping_ack(
     tls: TlsConfig,
     ack: ProjectMappingAckPayload,
 ) -> Result<()> {
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(2)
-        .enable_all()
-        .build()
-        .map_err(|error| AisyncError::Transport(format!("tokio runtime: {error}")))?;
-    runtime.block_on(async move {
+    run_control_future("send_project_mapping_ack", move || async move {
         let mut client = TcpTransporter::connect_addr(endpoint, &tls).await?;
         client.send_project_mapping_ack(ack).await
     })
@@ -2849,12 +2881,7 @@ fn send_workspace_mapping_request(
     tls: TlsConfig,
     request: WorkspaceMappingRequestPayload,
 ) -> Result<()> {
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(2)
-        .enable_all()
-        .build()
-        .map_err(|error| AisyncError::Transport(format!("tokio runtime: {error}")))?;
-    runtime.block_on(async move {
+    run_control_future("send_workspace_mapping_request", move || async move {
         let mut client = TcpTransporter::connect_addr(endpoint, &tls).await?;
         client.send_workspace_mapping_request(request).await
     })
@@ -2865,12 +2892,7 @@ fn send_workspace_mapping_ack(
     tls: TlsConfig,
     ack: WorkspaceMappingAckPayload,
 ) -> Result<()> {
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(2)
-        .enable_all()
-        .build()
-        .map_err(|error| AisyncError::Transport(format!("tokio runtime: {error}")))?;
-    runtime.block_on(async move {
+    run_control_future("send_workspace_mapping_ack", move || async move {
         let mut client = TcpTransporter::connect_addr(endpoint, &tls).await?;
         client.send_workspace_mapping_ack(ack).await
     })
@@ -2881,12 +2903,7 @@ fn send_text_message(
     tls: TlsConfig,
     message: TextMessagePayload,
 ) -> Result<()> {
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(2)
-        .enable_all()
-        .build()
-        .map_err(|error| AisyncError::Transport(format!("tokio runtime: {error}")))?;
-    runtime.block_on(async move {
+    run_control_future("send_text_message", move || async move {
         let mut client = TcpTransporter::connect_addr(endpoint, &tls).await?;
         client.send_text_message(message).await
     })
@@ -2897,12 +2914,7 @@ fn send_file_transfer_request(
     tls: TlsConfig,
     request: FileTransferRequestPayload,
 ) -> Result<()> {
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(2)
-        .enable_all()
-        .build()
-        .map_err(|error| AisyncError::Transport(format!("tokio runtime: {error}")))?;
-    runtime.block_on(async move {
+    run_control_future("send_file_transfer_request", move || async move {
         let transfer_id = request.transfer_id.clone();
         let filename = request.filename.clone();
         app_log(
@@ -2994,12 +3006,7 @@ fn send_file_transfer_ack(
     tls: TlsConfig,
     ack: FileTransferAckPayload,
 ) -> Result<()> {
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(2)
-        .enable_all()
-        .build()
-        .map_err(|error| AisyncError::Transport(format!("tokio runtime: {error}")))?;
-    runtime.block_on(async move {
+    run_control_future("send_file_transfer_ack", move || async move {
         let mut client = TcpTransporter::connect_addr(endpoint, &tls).await?;
         client.send_file_transfer_ack(ack).await
     })
@@ -3011,12 +3018,7 @@ fn send_file_transfer_data(
     transfer_id: String,
     source_path: PathBuf,
 ) -> Result<()> {
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(2)
-        .enable_all()
-        .build()
-        .map_err(|error| AisyncError::Transport(format!("tokio runtime: {error}")))?;
-    runtime.block_on(async move {
+    run_control_future("send_file_transfer_data", move || async move {
         let mut client = TcpTransporter::connect_addr(endpoint, &tls).await?;
         client
             .send_file_transfer_data(transfer_id, &source_path)
@@ -5081,6 +5083,28 @@ fn session_seed_key(config_path: &Path, target_key: &str) -> String {
     format!("{}:{target_key}", config_path.display())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SessionMtimeDecision {
+    BaselineNew,
+    TriggerNew,
+    TriggerModified,
+    Unchanged,
+}
+
+fn classify_session_mtime(
+    seen: &HashMap<String, SystemTime>,
+    key: &str,
+    mtime: SystemTime,
+    scan_initialized: bool,
+) -> SessionMtimeDecision {
+    match seen.get(key) {
+        Some(previous) if mtime > *previous => SessionMtimeDecision::TriggerModified,
+        Some(_) => SessionMtimeDecision::Unchanged,
+        None if scan_initialized => SessionMtimeDecision::TriggerNew,
+        None => SessionMtimeDecision::BaselineNew,
+    }
+}
+
 fn hash_prefix(fingerprint: &str) -> String {
     fingerprint.chars().take(8).collect()
 }
@@ -5275,6 +5299,7 @@ fn start_session_mtime_scanner(config_path: PathBuf, fallback_config: SyncConfig
         let mut seen = HashMap::<String, SystemTime>::new();
         let mut content_seen = HashMap::<String, String>::new();
         let mut sync_seen = HashMap::<String, String>::new();
+        let mut scan_initialized = false;
         loop {
             let mut config = load_config(&config_path).unwrap_or_else(|_| fallback_config.clone());
             if let Some(refreshed_config) = refresh_and_save_workspaces(&config_path) {
@@ -5307,9 +5332,10 @@ fn start_session_mtime_scanner(config_path: PathBuf, fallback_config: SyncConfig
                 };
                 let key = session_target_key(&target);
                 let sync_key = session_sync_key(&target);
-                let changed = match seen.get(&key) {
-                    Some(previous) => mtime > *previous,
-                    None => {
+                let decision = classify_session_mtime(&seen, &key, mtime, scan_initialized);
+                let is_new_target = decision == SessionMtimeDecision::TriggerNew;
+                match decision {
+                    SessionMtimeDecision::BaselineNew => {
                         baseline_session_target(
                             &config_path,
                             &config,
@@ -5322,17 +5348,25 @@ fn start_session_mtime_scanner(config_path: PathBuf, fallback_config: SyncConfig
                         );
                         continue;
                     }
-                };
-                seen.insert(key.clone(), mtime);
-                if !changed {
-                    if let Some(fingerprint) = target_content_fingerprint(&target) {
-                        content_seen.insert(key.clone(), fingerprint);
+                    SessionMtimeDecision::TriggerNew => app_log(
+                        "new_session_target_detected",
+                        &[
+                            ("scope", target.scope.to_string()),
+                            ("name", target.name.clone()),
+                            ("peer", target.peer.clone()),
+                            ("tool", target.tool.to_string()),
+                            ("path", target.path.display().to_string()),
+                        ],
+                    ),
+                    SessionMtimeDecision::TriggerModified => {}
+                    SessionMtimeDecision::Unchanged => {
+                        if let Some(fingerprint) = target_content_fingerprint(&target) {
+                            content_seen.insert(key.clone(), fingerprint);
+                        }
+                        continue;
                     }
-                    if let Some(fingerprint) = sync_fingerprint_for_target(&config, &target) {
-                        sync_seen.insert(sync_key, fingerprint);
-                    }
-                    continue;
                 }
+                seen.insert(key.clone(), mtime);
                 let content_key = key.clone();
                 let fingerprint = target_content_fingerprint(&target);
                 if fingerprint.is_some() && content_seen.get(&content_key) == fingerprint.as_ref() {
@@ -5426,9 +5460,17 @@ fn start_session_mtime_scanner(config_path: PathBuf, fallback_config: SyncConfig
                     continue;
                 }
 
-                let Some(gate_key) =
+                let gate_key = if is_new_target {
+                    begin_auto_sync_bypass_cooldown(
+                        target.scope,
+                        &target.name,
+                        &target.peer,
+                        "mtime_new_target",
+                    )
+                } else {
                     try_begin_auto_sync(target.scope, &target.name, &target.peer, "mtime")
-                else {
+                };
+                let Some(gate_key) = gate_key else {
                     continue;
                 };
                 app_log(
@@ -5560,6 +5602,7 @@ fn start_session_mtime_scanner(config_path: PathBuf, fallback_config: SyncConfig
                 finish_auto_sync(&gate_key);
             }
 
+            scan_initialized = true;
             std::thread::sleep(Duration::from_secs(interval_secs));
         }
     });
@@ -6033,6 +6076,14 @@ fn hash_file_contents(hasher: &mut blake3::Hasher, path: &Path) {
 }
 
 fn should_skip_hash_path(path: &Path) -> bool {
+    let mut previous_was_team = false;
+    for component in path.components() {
+        let name = component.as_os_str().to_string_lossy();
+        if previous_was_team && name == "runtime" {
+            return true;
+        }
+        previous_was_team = name == ".team";
+    }
     path.components().any(|component| {
         let name = component.as_os_str().to_string_lossy();
         matches!(
@@ -6631,7 +6682,14 @@ fn prepare_claude_session_sync(
         return Ok(None);
     };
 
-    let sessions = ClaudeCodeParser::parse_sessions(&local_projects_dir)?;
+    // P0(round7-mem)：只进本项目对应的编码目录，避免把整棵 ~/.claude/projects
+    // 全量读进内存后才过滤。Claude 按 cwd 编码会话目录，故本地项目的所有会话都落在
+    // claude_project_dir_name(local_code_dir) 这一个编码目录下。下方 same_project_path
+    // 仍作内容侧权威过滤，处理同一编码目录内多 cwd 碰撞的情况。
+    let local_encoded_dir = claude_project_dir_name(&project.local_code_dir);
+    let sessions = ClaudeCodeParser::parse_sessions_filtered(&local_projects_dir, |encoded| {
+        encoded == local_encoded_dir
+    })?;
     let mut sessions: Vec<_> = sessions
         .into_iter()
         .filter(|session| {
@@ -6865,7 +6923,14 @@ fn prepare_claude_workspace_session_sync(
         return Ok(None);
     };
 
-    let sessions = ClaudeCodeParser::parse_sessions(&local_projects_dir)?;
+    // P0(round7-mem)：workspace 的子项目会话落在不同编码目录，但都以 workspace 根的
+    // 编码目录名为前缀（claude_project_dir_name 逐字符编码、长度不变，故
+    // encode(root/sub) 必以 encode(root) 开头）。按前缀预过滤目录，避免全量解析；
+    // 下方 session_path_under 仍作内容侧权威过滤。
+    let local_encoded_prefix = claude_project_dir_name(&project.local_code_dir);
+    let sessions = ClaudeCodeParser::parse_sessions_filtered(&local_projects_dir, |encoded| {
+        encoded.starts_with(&local_encoded_prefix)
+    })?;
     let mut sessions: Vec<_> = sessions
         .into_iter()
         .filter(|session| {
@@ -7404,7 +7469,7 @@ fn restore_excludes(config: &mut SyncConfig, project_name: &str, saved: Option<V
 /// Order: explicit override env → platform hostname → generic fallback. On
 /// macOS we prefer the friendly `ComputerName` ("Alice's MacBook Pro") over the
 /// DNS-style `hostname` ("alices-macbook-pro.local"). Never fabricates a name
-/// like "AISync Device" unless every real source fails.
+/// like "CodeBaton Device" unless every real source fails.
 fn default_device_name() -> String {
     if let Ok(name) = std::env::var("AISYNC_DEVICE_NAME") {
         if !name.trim().is_empty() {
@@ -7417,7 +7482,7 @@ fn default_device_name() -> String {
     PLACEHOLDER_DEVICE_NAME.to_string()
 }
 
-const PLACEHOLDER_DEVICE_NAME: &str = "AISync Device";
+const PLACEHOLDER_DEVICE_NAME: &str = "CodeBaton Device";
 
 /// A device name that should be re-derived from the host: empty, whitespace, or
 /// the legacy placeholder a sandboxed older build wrote.
@@ -7600,7 +7665,7 @@ mod tests {
 
     #[test]
     fn placeholder_names_are_detected_for_healing() {
-        assert!(is_placeholder_device_name("AISync Device"));
+        assert!(is_placeholder_device_name("CodeBaton Device"));
         assert!(is_placeholder_device_name("aisync-device"));
         assert!(is_placeholder_device_name(""));
         assert!(is_placeholder_device_name("   "));
@@ -8379,6 +8444,139 @@ mod tests {
     }
 
     #[test]
+    fn session_mtime_decision_triggers_new_target_after_initial_scan() {
+        let key = "project:empty:peer:claude:/session".to_string();
+        let mtime = std::time::UNIX_EPOCH + std::time::Duration::from_secs(10);
+        let mut seen = HashMap::new();
+
+        assert_eq!(
+            classify_session_mtime(&seen, &key, mtime, false),
+            SessionMtimeDecision::BaselineNew
+        );
+        assert_eq!(
+            classify_session_mtime(&seen, &key, mtime, true),
+            SessionMtimeDecision::TriggerNew
+        );
+
+        seen.insert(key.clone(), mtime);
+        assert_eq!(
+            classify_session_mtime(&seen, &key, mtime, true),
+            SessionMtimeDecision::Unchanged
+        );
+        assert_eq!(
+            classify_session_mtime(&seen, &key, mtime + std::time::Duration::from_secs(1), true,),
+            SessionMtimeDecision::TriggerModified
+        );
+    }
+
+    #[test]
+    fn empty_project_session_target_uses_claude_encoded_dir_when_it_appears() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project_dir = tmp.path().join("empty-project");
+        let remote_dir = tmp.path().join("remote-project");
+        let claude_dir = tmp.path().join(".claude");
+        fs::create_dir_all(&project_dir).unwrap();
+        fs::create_dir_all(claude_dir.join("projects")).unwrap();
+
+        let mut config = SyncConfig::new("local");
+        config.claude_config.local = claude_dir.clone();
+        config.projects.push(ProjectConfig {
+            name: "empty".to_string(),
+            local: project_dir.clone(),
+            peers: HashMap::from([("peer".to_string(), remote_dir)]),
+            sync_mode: SyncModeConfig::OneWayPush,
+            enabled: true,
+            exclude_rules: Vec::new(),
+        });
+        assert!(!session_mtime_targets(&config)
+            .iter()
+            .any(|target| target.tool == "claude"));
+
+        let session_dir = claude_dir
+            .join("projects")
+            .join(claude_project_dir_name(&project_dir));
+        fs::create_dir_all(&session_dir).unwrap();
+        fs::write(
+            session_dir.join("s.jsonl"),
+            format!(
+                "{}\n",
+                serde_json::json!({
+                    "type": "user",
+                    "cwd": project_dir.to_string_lossy(),
+                    "sessionId": "s"
+                })
+            ),
+        )
+        .unwrap();
+
+        let targets = session_mtime_targets(&config);
+        let target = targets
+            .iter()
+            .find(|target| {
+                target.scope == "project" && target.name == "empty" && target.tool == "claude"
+            })
+            .expect("new Claude session dir should become a project target");
+        assert_eq!(target.path, session_dir);
+    }
+
+    #[test]
+    fn empty_workspace_child_session_target_uses_child_encoded_dir_when_it_appears() {
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace_root = tmp.path().join("workspace");
+        let remote_root = tmp.path().join("remote");
+        let child_dir = workspace_root.join("empty-child");
+        let claude_dir = tmp.path().join(".claude");
+        fs::create_dir_all(&child_dir).unwrap();
+        fs::create_dir_all(claude_dir.join("projects")).unwrap();
+
+        let mut config = SyncConfig::new("local");
+        config.claude_config.local = claude_dir.clone();
+        config.workspaces.push(WorkspaceConfig {
+            name: "workspace".to_string(),
+            local_root: workspace_root.clone(),
+            remote_root: remote_root.clone(),
+            peer: "peer".to_string(),
+            children: workspace_children(&workspace_root, &remote_root, true).unwrap(),
+            local: workspace_root,
+            peers: HashMap::new(),
+            scan_depth: 1,
+            auto_enable_new: true,
+            sync_mode: SyncModeConfig::TwoWayAuto,
+            enabled: true,
+            exclude_rules: Vec::new(),
+        });
+
+        let session_dir = claude_dir
+            .join("projects")
+            .join(claude_project_dir_name(&child_dir));
+        fs::create_dir_all(&session_dir).unwrap();
+        fs::write(
+            session_dir.join("s.jsonl"),
+            format!(
+                "{}\n",
+                serde_json::json!({
+                    "type": "user",
+                    "cwd": child_dir.to_string_lossy(),
+                    "sessionId": "s"
+                })
+            ),
+        )
+        .unwrap();
+
+        let targets = session_mtime_targets(&config);
+        let target = targets
+            .iter()
+            .find(|target| {
+                target.scope == "workspace"
+                    && target.name == "workspace"
+                    && target.tool == "claude"
+                    && target.path == session_dir
+            })
+            .expect("new child Claude session dir should become a workspace target");
+        assert_eq!(target.peer, "peer");
+    }
+
+    #[test]
     fn workspace_sync_fingerprint_ignores_unrelated_codex_sessions() {
         static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
@@ -8657,7 +8855,7 @@ mod tests {
     }
 }
 
-/// Start the TLS receive daemon on a dedicated thread so other AISync instances
+/// Start the TLS receive daemon on a dedicated thread so other CodeBaton instances
 /// can push to this one. Writes the receiver's self-signed cert (.der) next to
 /// the config so a peer can pin it. Returns connection coordinates, or `None`
 /// if binding fails (e.g. port in use) — the UI still works, just can't receive.

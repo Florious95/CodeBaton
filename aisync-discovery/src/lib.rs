@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 pub const AISYNC_SERVICE_TYPE: &str = "_aisync._tcp.local.";
-pub const AISYNC_KEYRING_SERVICE: &str = "AISync";
+pub const AISYNC_KEYRING_SERVICE: &str = "CodeBaton";
 pub const PROTOCOL_VERSION: u32 = 1;
 pub const DEFAULT_OFFLINE_AFTER: Duration = Duration::from_secs(90);
 const ED25519_PRIVATE_KEY_LEN: usize = 32;
@@ -815,7 +815,7 @@ pub fn manual_device_from_socket_addr(
 ) -> Result<DeviceInfo> {
     if !probe_aisync_port(address.ip(), address.port(), timeout) {
         return Err(AisyncError::Discovery(format!(
-            "AISync peer is not reachable at {address}"
+            "CodeBaton peer is not reachable at {address}"
         )));
     }
 
@@ -1598,7 +1598,7 @@ fn default_pairing_store_path() -> PathBuf {
         std::env::var_os("APPDATA")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("."))
-            .join("AISync")
+            .join("CodeBaton")
             .join("paired_peers.json")
     } else {
         std::env::var_os("HOME")
@@ -2256,7 +2256,9 @@ mod tests {
 
         let error = discoverer.discover_manual_peer(address).unwrap_err();
 
-        assert!(error.to_string().contains("AISync peer is not reachable"));
+        assert!(error
+            .to_string()
+            .contains("CodeBaton peer is not reachable"));
         assert!(discoverer.peers().unwrap().is_empty());
     }
 }

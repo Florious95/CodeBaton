@@ -36,12 +36,12 @@ function BehaviorRow({
 }
 
 export function SettingsPage() {
-  const { setDialog, theme, setTheme } = useStore();
+  const { setDialog, theme, setTheme, t: tr } = useStore();
   const [s, setS] = useState<Settings | null>(null);
   useEffect(() => {
     ipc.getSettings().then(setS).catch(() => {});
   }, []);
-  if (!s) return <div className="empty">加载中...</div>;
+  if (!s) return <div className="empty">{tr.loading}</div>;
 
   const update = (patch: Partial<Settings>) => {
     const next = { ...s, ...patch };
@@ -52,50 +52,50 @@ export function SettingsPage() {
   return (
     <div>
       <div className="page-head">
-        <h1>设置</h1>
+        <h1>{tr.settingsTitle}</h1>
       </div>
 
-      <div className="section-title">本机</div>
+      <div className="section-title">{tr.selfMachine}</div>
       <div className="detail-grid">
-        <span className="label">设备名称</span>
+        <span className="label">{tr.deviceName}</span>
         <input value={s.deviceName} onChange={(e) => update({ deviceName: e.target.value })} />
         <span />
-        <span className="label">设备 ID</span>
+        <span className="label">{tr.deviceId}</span>
         <span className="path">{s.deviceId}</span>
         <button
           className="tiny"
           onClick={() => {
             navigator.clipboard?.writeText(s.deviceId);
-            pushToast("已复制设备 ID");
+            pushToast(tr.copiedDeviceId);
           }}
         >
           <Copy size={13} />
         </button>
       </div>
 
-      <div className="section-title">外观</div>
+      <div className="section-title">{tr.appearance}</div>
       <div className="detail-grid sync">
-        <span className="label">主题</span>
+        <span className="label">{tr.theme}</span>
         <span>
           <select
             className="pill"
             value={theme}
             onChange={(e) => setTheme(e.target.value as "dark" | "light" | "system")}
           >
-            <option value="system">跟随系统</option>
-            <option value="dark">暗色</option>
-            <option value="light">亮色</option>
+            <option value="system">{tr.themeSystem}</option>
+            <option value="dark">{tr.themeDark}</option>
+            <option value="light">{tr.themeLight}</option>
           </select>
         </span>
-        <span className="faint">亮/暗主题，默认跟随系统</span>
+        <span className="faint">{tr.themeFollowsSystem}</span>
       </div>
 
-      <div className="section-title">AI 工具配置目录</div>
+      <div className="section-title">{tr.aiToolConfigDir}</div>
       <div className="card flush">
         {s.tools.map((t) => (
           <div className="tool-row" key={t.name}>
             <strong>{t.name}</strong>
-            <span className="path">{t.installed ? t.configDir : "未检测到"}</span>
+            <span className="path">{t.installed ? t.configDir : tr.notDetected}</span>
             <button
               className="tiny"
               onClick={() => {
@@ -104,43 +104,43 @@ export function SettingsPage() {
                   .getSettings()
                   .then((fresh) => {
                     setS(fresh);
-                    pushToast(`已重新检测 ${t.name}`);
+                    pushToast(tr.redetected(t.name));
                   })
                   .catch(() => {});
               }}
             >
-              自动检测
+              {tr.autoDetect}
             </button>
             <button
               className="tiny"
               disabled={!t.installed}
-              title={t.installed ? "在 Finder 中打开" : "未检测到该工具"}
+              title={t.installed ? tr.openInFinder : tr.toolNotDetected}
               onClick={async () => {
                 ipc.uiLog(`settings_tool_path_modify_clicked tool=${t.name} dir=${t.configDir}`);
                 try {
                   await ipc.openPath(t.configDir);
                 } catch (e) {
-                  pushToast(`打开失败：${String(e)}`);
+                  pushToast(tr.openFailed(String(e)));
                 }
               }}
             >
-              打开目录
+              {tr.openDir}
             </button>
           </div>
         ))}
       </div>
 
-      <div className="section-title">同步</div>
+      <div className="section-title">{tr.syncSection}</div>
       <div className="detail-grid sync">
-        <span className="label">去抖动时间</span>
+        <span className="label">{tr.debounceTime}</span>
         <input
           type="number"
           style={{ width: 80 }}
           value={s.debounceSecs}
           onChange={(e) => update({ debounceSecs: +e.target.value })}
         />
-        <span className="faint">秒 — 文件变更后等待多久触发同步</span>
-        <span className="label">刷新周期</span>
+        <span className="faint">{tr.debounceHint}</span>
+        <span className="label">{tr.refreshInterval}</span>
         <input
           type="number"
           min={1}
@@ -148,60 +148,60 @@ export function SettingsPage() {
           value={s.refreshIntervalSecs}
           onChange={(e) => update({ refreshIntervalSecs: +e.target.value })}
         />
-        <span className="faint">秒 — 会话目录 mtime 增量扫描</span>
-        <span className="label">传输端口</span>
+        <span className="faint">{tr.refreshHint}</span>
+        <span className="label">{tr.transferPort}</span>
         <input
           type="number"
           style={{ width: 100 }}
           value={s.port}
           onChange={(e) => update({ port: +e.target.value })}
         />
-        <span className="faint">TCP 通信端口</span>
+        <span className="faint">{tr.portHint}</span>
       </div>
 
-      <div className="section-title">全局排除规则</div>
+      <div className="section-title">{tr.globalExcludeRules}</div>
       <textarea
         rows={8}
         value={s.globalExcludes.join("\n")}
         onChange={(e) => update({ globalExcludes: e.target.value.split("\n") })}
       />
       <div className="spread" style={{ marginTop: 7 }}>
-        <span className="hint">每行一条 glob 模式</span>
-        <button className="ghost tiny">恢复默认</button>
+        <span className="hint">{tr.globPerLine}</span>
+        <button className="ghost tiny">{tr.restoreDefault}</button>
       </div>
 
-      <div className="section-title">敏感文件模式</div>
+      <div className="section-title">{tr.sensitivePatterns}</div>
       <textarea
         rows={5}
         value={s.sensitivePatterns.join("\n")}
         onChange={(e) => update({ sensitivePatterns: e.target.value.split("\n") })}
       />
       <div className="hint" style={{ marginTop: 7 }}>
-        匹配这些模式的文件同步前需要额外确认
+        {tr.sensitiveHint}
       </div>
 
-      <div className="section-title">行为</div>
+      <div className="section-title">{tr.behavior}</div>
       <div className="behavior-list">
         <BehaviorRow
-          label="开机自启动"
+          label={tr.autoStart}
           checked={s.autoStart}
           onChange={(v) => update({ autoStart: v })}
         />
         <BehaviorRow
-          label="最小化到托盘"
+          label={tr.minimizeToTray}
           checked={s.minimizeToTray}
           onChange={(v) => update({ minimizeToTray: v })}
         />
         <BehaviorRow
-          label="同步完成通知"
+          label={tr.notifyOnComplete}
           checked={s.notifyOnComplete}
           onChange={(v) => update({ notifyOnComplete: v })}
         />
       </div>
 
-      <div className="section-title">日志</div>
+      <div className="section-title">{tr.logs}</div>
       <div className="detail-grid">
-        <span className="label">日志级别</span>
+        <span className="label">{tr.logLevel}</span>
         <span>
           <select
             className="pill"
@@ -216,7 +216,7 @@ export function SettingsPage() {
           </select>
         </span>
         <span />
-        <span className="label">日志目录</span>
+        <span className="label">{tr.logDir}</span>
         <span className="path">{s.logDir}</span>
         <button
           className="tiny"
@@ -225,11 +225,11 @@ export function SettingsPage() {
             try {
               await ipc.openPath(s.logDir);
             } catch (e) {
-              pushToast(`打开失败：${String(e)}`);
+              pushToast(tr.openFailed(String(e)));
             }
           }}
         >
-          打开
+          {tr.open}
         </button>
       </div>
 
@@ -247,7 +247,7 @@ export function SettingsPage() {
             setDialog({ kind: "wizard" });
           }}
         >
-          重新运行首次向导
+          {tr.rerunWizard}
         </button>
       </div>
       <div style={{ height: 20 }} />

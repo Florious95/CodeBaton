@@ -213,6 +213,20 @@ impl ClaudeCodeParser {
     /// 解析 config_dir 下所有项目目录的所有会话。
     /// config_dir 可以是 `.claude` 或 `.claude/projects`。
     pub fn parse_sessions(config_dir: &Path) -> Result<Vec<ParsedSession>> {
+        Self::parse_sessions_filtered(config_dir, |_| true)
+    }
+
+    /// 同 [`parse_sessions`]，但只解析 `dir_filter` 返回 true 的编码目录。
+    ///
+    /// 用于同步热路径：避免把整棵 `~/.claude/projects`（可能上千文件、GB 级）
+    /// 全量读进内存后才按项目过滤。调用方传入只匹配目标项目编码目录名的谓词，
+    /// 不匹配的子目录连 `read_dir`/`read_to_string` 都不会发生。
+    /// 编码目录名按 `parse_session_file` 的来源约定，与 backend 的
+    /// `claude_project_dir_name` 逐字符一致（仅 ASCII 字母数字 `-_.` 保留，其余塌缩成 `-`）。
+    pub fn parse_sessions_filtered(
+        config_dir: &Path,
+        dir_filter: impl Fn(&str) -> bool,
+    ) -> Result<Vec<ParsedSession>> {
         let projects_dir = if config_dir.join("projects").is_dir() {
             config_dir.join("projects")
         } else {
@@ -231,6 +245,9 @@ impl ClaudeCodeParser {
                 Some(name) => name.to_string(),
                 None => continue,
             };
+            if !dir_filter(&encoded_dir_name) {
+                continue;
+            }
             for file in fs::read_dir(&dir)? {
                 let file = file?;
                 let fpath = file.path();
@@ -481,6 +498,59 @@ mod tests {
         );
         assert_eq!(sessions[0].encoded_dir_name, "-Users-alice-code---");
         assert_eq!(sessions[0].session_id, "sess1");
+    }
+
+    #[test]
+    fn parse_sessions_filtered_only_scans_matching_dirs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+
+        // 目标项目目录
+        let target = projects.join("-Users-alice-code-target");
+        fs::create_dir_all(&target).unwrap();
+        write_jsonl(
+            &target,
+            "s.jsonl",
+            &[r#"{"type":"user","cwd":"/Users/alice/code/target","sessionId":"s"}"#],
+        );
+
+        // 不相关的大目录：若被解析会读进内容；过滤后应整体跳过。
+        let other = projects.join("-Users-alice-code-other");
+        fs::create_dir_all(&other).unwrap();
+        write_jsonl(
+            &other,
+            "x.jsonl",
+            &[r#"{"type":"user","cwd":"/Users/alice/code/other","sessionId":"x"}"#],
+        );
+
+        let sessions = ClaudeCodeParser::parse_sessions_filtered(&projects, |encoded| {
+            encoded == "-Users-alice-code-target"
+        })
+        .unwrap();
+        assert_eq!(sessions.len(), 1, "only the matching dir should be parsed");
+        assert_eq!(sessions[0].original_project_path, "/Users/alice/code/target");
+
+        // 前缀过滤（workspace 场景）：root 编码名是子目录编码名的前缀。
+        let sub = projects.join("-Users-alice-code-target-sub");
+        fs::create_dir_all(&sub).unwrap();
+        write_jsonl(
+            &sub,
+            "y.jsonl",
+            &[r#"{"type":"user","cwd":"/Users/alice/code/target/sub","sessionId":"y"}"#],
+        );
+        let prefix_hits = ClaudeCodeParser::parse_sessions_filtered(&projects, |encoded| {
+            encoded.starts_with("-Users-alice-code-target")
+        })
+        .unwrap();
+        assert_eq!(
+            prefix_hits.len(),
+            2,
+            "prefix filter should catch root + subdir, not the unrelated dir"
+        );
+
+        // 兼容性：无过滤等价于全量扫描。
+        let all = ClaudeCodeParser::parse_sessions(&projects).unwrap();
+        assert_eq!(all.len(), 3);
     }
 
     #[test]

@@ -19,7 +19,7 @@ function baseName(p: string): string {
 }
 
 export function FileTransferTab({ peerName, online }: { peerName: string; online: boolean }) {
-  const { clearUnread, bumpUnreadFiles } = useStore();
+  const { clearUnread, bumpUnreadFiles, t } = useStore();
   const [outgoing, setOutgoing] = useState<LocalXfer[]>([]);
   const [pending, setPending] = useState<PendingFileTransfer[]>([]);
   const [history, setHistory] = useState<FileTransferRecord[]>([]);
@@ -76,26 +76,26 @@ export function FileTransferTab({ peerName, online }: { peerName: string; online
     try {
       await doSend();
       mark("sent");
-      pushToast(`已发送 ${filename}`);
+      pushToast(t.fileSent(filename));
     } catch (e) {
       const msg = String(e);
       if (msg.includes("sensitive-file:")) {
         const rel = msg.split("sensitive-file:")[1]?.trim() || filename;
-        if (window.confirm(`「${rel}」疑似敏感文件，确认仍要发送给 ${peerName}？`)) {
+        if (window.confirm(t.sensitiveConfirm(rel, peerName))) {
           try {
             await doSend([rel]);
             mark("sent");
-            pushToast(`已发送 ${filename}`);
+            pushToast(t.fileSent(filename));
           } catch (e2) {
             mark("failed", String(e2));
-            pushToast(`发送失败：${String(e2)}`);
+            pushToast(t.sendFailed(String(e2)));
           }
         } else {
-          mark("failed", "用户取消（敏感文件）");
+          mark("failed", t.userCancelSensitive);
         }
       } else {
         mark("failed", msg);
-        pushToast(`发送失败：${msg}`);
+        pushToast(t.sendFailed(msg));
       }
     }
   };
@@ -104,15 +104,15 @@ export function FileTransferTab({ peerName, online }: { peerName: string; online
   // 选+发一步完成，返回 transfer_id 数组；历史由后端 file_transfer_history 反映。
   const pickAndSend = async () => {
     if (!online) {
-      pushToast("对端离线，无法发送");
+      pushToast(t.peerOfflineCantSend);
       return;
     }
     ipc.uiLog(`file_pick_send peer=${peerName}`);
     try {
       const ids = await ipc.pickFilesForTransfer(peerName);
-      if (ids && ids.length) pushToast(`已发送 ${ids.length} 个文件`);
+      if (ids && ids.length) pushToast(t.filesSent(ids.length));
     } catch (e) {
-      pushToast(`发送失败：${String(e)}`);
+      pushToast(t.sendFailed(String(e)));
     }
   };
 
@@ -123,7 +123,7 @@ export function FileTransferTab({ peerName, online }: { peerName: string; online
       setDragOver(false);
       const list: string[] = (p as any)?.paths || (Array.isArray(p) ? (p as any) : []);
       if (!online) {
-        pushToast("对端离线，无法发送");
+        pushToast(t.peerOfflineCantSend);
         return;
       }
       list.forEach((path) => void sendPath(path));
@@ -131,14 +131,14 @@ export function FileTransferTab({ peerName, online }: { peerName: string; online
     listen("tauri://drag-enter", () => setDragOver(true)).then((u) => uns.push(u));
     listen("tauri://drag-leave", () => setDragOver(false)).then((u) => uns.push(u));
     return () => uns.forEach((u) => u());
-  }, [peerName, online]);
+  }, [peerName, online, t]);
 
   // 接收：选目录 → 询问设默认 → accept（ISS-018）。
   const accept = async (p: PendingFileTransfer) => {
     const dir = await ipc.pickDirectory().catch(() => null);
     if (!dir) return;
     // 仅当尚无默认目录时才询问“是否设为默认”；用户取消后不再纠缠。
-    if (!defaultDir && window.confirm(`是否将「${dir}」设为默认接收目录？\n以后接收文件不再每次询问。`)) {
+    if (!defaultDir && window.confirm(t.setDefaultReceiveDir(dir))) {
       try {
         await ipc.setDefaultReceiveDir(dir);
         setDefaultDir(dir);
@@ -149,10 +149,10 @@ export function FileTransferTab({ peerName, online }: { peerName: string; online
     try {
       await ipc.acceptFileTransfer(p.id, dir);
       ipc.uiLog(`file_accept id=${p.id} dir=${dir}`);
-      pushToast(`已接收 ${p.filename}`);
+      pushToast(t.fileReceived(p.filename));
       setPending((prev) => prev.filter((x) => x.id !== p.id));
     } catch (e) {
-      pushToast(`接收失败：${String(e)}`);
+      pushToast(t.receiveFailed(String(e)));
     }
   };
 
@@ -162,9 +162,9 @@ export function FileTransferTab({ peerName, online }: { peerName: string; online
     try {
       await ipc.setDefaultReceiveDir(dir);
       setDefaultDir(dir);
-      pushToast("已更新默认接收目录");
+      pushToast(t.defaultDirUpdated);
     } catch (e) {
-      pushToast(`设置失败：${String(e)}`);
+      pushToast(t.setFailed(String(e)));
     }
   };
 
@@ -176,7 +176,7 @@ export function FileTransferTab({ peerName, online }: { peerName: string; online
         const tag = (e.target as HTMLElement)?.tagName;
         if (tag === "INPUT" || tag === "TEXTAREA") return;
         if (!online) {
-          pushToast("对端离线，无法发送");
+          pushToast(t.peerOfflineCantSend);
           return;
         }
         e.preventDefault();
@@ -184,24 +184,24 @@ export function FileTransferTab({ peerName, online }: { peerName: string; online
         ipc
           .pasteFilesForTransfer(peerName)
           .then((ids) => {
-            if (ids && ids.length) pushToast(`已粘贴并发送 ${ids.length} 个文件`);
-            else pushToast("剪贴板没有文件");
+            if (ids && ids.length) pushToast(t.pastedAndSent(ids.length));
+            else pushToast(t.clipboardNoFile);
           })
-          .catch((err) => pushToast(`粘贴发送失败：${String(err)}`));
+          .catch((err) => pushToast(t.pasteSendFailed(String(err))));
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [peerName, online]);
+  }, [peerName, online, t]);
 
   return (
     <div style={{ marginTop: 14 }}>
       {/* 默认接收目录设置项 */}
       <div className="detail-grid sync" style={{ marginTop: 0 }}>
-        <span className="label">默认接收目录</span>
-        <span className="path">{defaultDir || "（未设置，接收时每次选择）"}</span>
+        <span className="label">{t.defaultReceiveDir}</span>
+        <span className="path">{defaultDir || t.notSetPickEachTime}</span>
         <button className="tiny" onClick={changeDefaultDir}>
-          <FolderOpen size={12} style={{ verticalAlign: "-2px" }} /> 修改
+          <FolderOpen size={12} style={{ verticalAlign: "-2px" }} /> {t.modify}
         </button>
       </div>
 
@@ -210,18 +210,18 @@ export function FileTransferTab({ peerName, online }: { peerName: string; online
           用户想改目录直接点上面的「修改」。 */}
       {!defaultDir && pending.length > 0 && (
         <>
-          <div className="section-title">待接收文件（{pending.length}）</div>
+          <div className="section-title">{t.pendingFiles(pending.length)}</div>
           <p className="faint" style={{ fontSize: 11, margin: "0 0 6px" }}>
-            未设默认接收目录，请为每个文件选择保存位置（设默认后将自动接收）。
+            {t.pendingHint}
           </p>
           <div className="card flush">
             {pending.map((p) => (
               <div className="tool-row" key={p.id} style={{ gridTemplateColumns: "1fr auto" }}>
                 <span className="path">
-                  {p.filename} <span className="faint">· {fmtBytes(p.size)} · 来自 {p.senderName}</span>
+                  {p.filename} <span className="faint">{t.fromSender(fmtBytes(p.size), p.senderName)}</span>
                 </span>
                 <button className="primary tiny" onClick={() => void accept(p)}>
-                  选目录接收
+                  {t.pickDirReceive}
                 </button>
               </div>
             ))}
@@ -233,29 +233,27 @@ export function FileTransferTab({ peerName, online }: { peerName: string; online
       <div
         className={`drop-zone ${dragOver ? "over" : ""}`}
         onClick={pickAndSend}
-        title={online ? "拖拽文件到此发送，或点击选择" : "对端离线"}
+        title={online ? t.dropToSend : t.peerOffline}
         style={{ marginTop: 12 }}
       >
         <Upload size={22} />
-        <div>{dragOver ? "松开发送" : `拖拽文件到此发送到 ${peerName}`}</div>
+        <div>{dragOver ? t.releaseToSend : t.dropFilesTo(peerName)}</div>
         <div className="faint" style={{ fontSize: 11 }}>
-          {online
-            ? "或点击选择文件；Cmd+V 粘贴发送已复制的文件"
-            : "对端离线，暂不可发送"}
+          {online ? t.clickOrPaste : t.offlineCantSend}
         </div>
       </div>
 
       {/* 传输历史（含传入/传出） */}
-      <div className="section-title">传输历史</div>
+      <div className="section-title">{t.transferHistory}</div>
       {outgoing.length === 0 && history.length === 0 ? (
         <p className="faint" style={{ fontSize: 12 }}>
-          暂无传输记录
+          {t.noTransferRecord}
         </p>
       ) : (
         <div className="card flush">
           {history.map((h, i) => (
             <div className="tool-row" key={`h${i}`} style={{ gridTemplateColumns: "20px 1fr auto auto" }}>
-              <span title={h.direction === "out" ? "发出" : "收到"}>
+              <span title={h.direction === "out" ? t.outgoing : t.incoming}>
                 {h.direction === "out" ? <ArrowUp size={14} /> : <ArrowDown size={14} />}
               </span>
               <span className="path">
@@ -263,7 +261,7 @@ export function FileTransferTab({ peerName, online }: { peerName: string; online
               </span>
               <span className="faint" style={{ fontSize: 11 }}>{fmtTime(String(h.timestamp))}</span>
               <span className={h.status === "failed" ? "status-pill error" : "status-pill synced"}>
-                {h.direction === "out" ? "已发送" : "已接收"}
+                {h.direction === "out" ? t.sent : t.received}
               </span>
             </div>
           ))}
@@ -271,17 +269,17 @@ export function FileTransferTab({ peerName, online }: { peerName: string; online
               outgoing 只展示「发送中」这类尚未进 core 历史的瞬时状态，"已发送"
               成功记录交给 core history 显示，不在前端重复写一条。 */}
           {outgoing
-            .filter((t) => t.status !== "sent")
-            .map((t, i) => (
+            .filter((xfer) => xfer.status !== "sent")
+            .map((xfer, i) => (
               <div className="tool-row" key={`o${i}`} style={{ gridTemplateColumns: "20px 1fr auto auto" }}>
-                <span title="发出"><ArrowUp size={14} /></span>
-                <span className="path">{t.filename}</span>
-                <span className="faint" style={{ fontSize: 11 }}>{fmtTime(String(t.ts))}</span>
+                <span title={t.outgoing}><ArrowUp size={14} /></span>
+                <span className="path">{xfer.filename}</span>
+                <span className="faint" style={{ fontSize: 11 }}>{fmtTime(String(xfer.ts))}</span>
                 <span
-                  className={t.status === "failed" ? "status-pill error" : "status-pill syncing"}
-                  title={t.detail ?? ""}
+                  className={xfer.status === "failed" ? "status-pill error" : "status-pill syncing"}
+                  title={xfer.detail ?? ""}
                 >
-                  {t.status === "failed" ? "失败" : "发送中"}
+                  {xfer.status === "failed" ? t.failed : t.sending}
                 </span>
               </div>
             ))}

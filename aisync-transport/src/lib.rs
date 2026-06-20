@@ -23,6 +23,61 @@ use tokio::net::TcpStream;
 use tokio_rustls::{TlsAcceptor, TlsConnector};
 use walkdir::WalkDir;
 
+mod serde_bytes {
+    use serde::de::{self, SeqAccess, Visitor};
+    use serde::{Deserializer, Serializer};
+    use std::fmt;
+
+    pub fn serialize<S>(bytes: &Vec<u8>, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_bytes(bytes)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> std::result::Result<Vec<u8>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_byte_buf(ByteBufVisitor)
+    }
+
+    struct ByteBufVisitor;
+
+    impl<'de> Visitor<'de> for ByteBufVisitor {
+        type Value = Vec<u8>;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("a byte buffer")
+        }
+
+        fn visit_bytes<E>(self, value: &[u8]) -> std::result::Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            Ok(value.to_vec())
+        }
+
+        fn visit_byte_buf<E>(self, value: Vec<u8>) -> std::result::Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            Ok(value)
+        }
+
+        fn visit_seq<A>(self, mut seq: A) -> std::result::Result<Self::Value, A::Error>
+        where
+            A: SeqAccess<'de>,
+        {
+            let mut bytes = Vec::with_capacity(seq.size_hint().unwrap_or(0));
+            while let Some(byte) = seq.next_element::<u8>()? {
+                bytes.push(byte);
+            }
+            Ok(bytes)
+        }
+    }
+}
+
 pub const PROTOCOL_VERSION: u32 = 2;
 pub const SMALL_FILE_THRESHOLD: u64 = 64 * 1024;
 const FILE_CHUNK_SIZE: usize = 1024 * 1024;
@@ -198,6 +253,7 @@ pub struct FileTransferRequestPayload {
 pub struct FileTransferDataPayload {
     pub transfer_id: String,
     pub offset: u64,
+    #[serde(with = "serde_bytes")]
     pub chunk: Vec<u8>,
     pub done: bool,
 }
@@ -230,6 +286,7 @@ pub enum Message {
         path: String,
         base_hash: Option<String>,
         target_hash: String,
+        #[serde(with = "serde_bytes")]
         delta: Vec<u8>,
         size: u64,
     },
@@ -237,11 +294,13 @@ pub enum Message {
         path: String,
         target_hash: String,
         offset: u64,
+        #[serde(with = "serde_bytes")]
         data: Vec<u8>,
         size: u64,
         done: bool,
     },
     FileBatch {
+        #[serde(with = "serde_bytes")]
         tar_stream: Vec<u8>,
     },
     FileDelete {
@@ -249,6 +308,7 @@ pub enum Message {
     },
     SessionData {
         project_id: String,
+        #[serde(with = "serde_bytes")]
         data: Vec<u8>,
     },
     SyncComplete,
@@ -318,6 +378,7 @@ impl Message {
 pub struct SignatureEntry {
     pub relative_path: String,
     pub base_hash: String,
+    #[serde(with = "serde_bytes")]
     pub signature: Vec<u8>,
 }
 
@@ -2238,6 +2299,15 @@ pub fn make_delta(base: &[u8], target: &[u8]) -> Result<Vec<u8>> {
     Ok(delta)
 }
 
+fn make_delta_from_signature(serialized_signature: &[u8], target: &[u8]) -> Result<Vec<u8>> {
+    let signature = Signature::deserialize(serialized_signature.to_vec())
+        .map_err(|_| transport_err("invalid rsync signature".to_string()))?;
+    let indexed = signature.index();
+    let mut delta = Vec::new();
+    diff(&indexed, target, &mut delta).map_err(|error| transport_err(error.to_string()))?;
+    Ok(delta)
+}
+
 pub fn apply_delta(base: &[u8], delta: &[u8], expected_hash: &str) -> Result<Vec<u8>> {
     let mut out = Vec::new();
     apply(base, delta, &mut out).map_err(|error| transport_err(error.to_string()))?;
@@ -2461,7 +2531,10 @@ where
 
     let mut small_files = Vec::new();
     let mut small_file_bytes = 0u64;
-    let _ = signatures;
+    let signatures_by_path: HashMap<&str, &SignatureEntry> = signatures
+        .iter()
+        .map(|signature| (signature.relative_path.as_str(), signature))
+        .collect();
 
     for entry in manifest_diff
         .added
@@ -2495,7 +2568,11 @@ where
             continue;
         }
 
-        send_file_chunks(stream, source_dir, entry).await?;
+        if let Some(signature) = signatures_by_path.get(entry.relative_path.as_str()) {
+            send_file_delta(stream, source_dir, entry, signature).await?;
+        } else {
+            send_file_chunks(stream, source_dir, entry).await?;
+        }
         bytes_done += entry.size;
         emit_progress(
             progress,
@@ -2524,6 +2601,45 @@ where
         }
     }
 
+    Ok(())
+}
+
+async fn send_file_delta<S>(
+    stream: &mut S,
+    source_dir: &Path,
+    entry: &FileEntry,
+    signature: &SignatureEntry,
+) -> Result<()>
+where
+    S: AsyncWrite + Unpin,
+{
+    let path = source_dir.join(checked_relative_path(&entry.relative_path)?);
+    let target = fs::read(&path)?;
+    let delta = make_delta_from_signature(&signature.signature, &target)?;
+    trace_stage(
+        "file_delta_write_start",
+        format!(
+            "path={} size={} delta_bytes={}",
+            entry.relative_path,
+            entry.size,
+            delta.len()
+        ),
+    );
+    write_message(
+        stream,
+        &Message::FileDelta {
+            path: entry.relative_path.clone(),
+            base_hash: Some(signature.base_hash.clone()),
+            target_hash: entry.blake3_hash.clone(),
+            delta,
+            size: entry.size,
+        },
+    )
+    .await?;
+    trace_stage(
+        "file_delta_write_done",
+        format!("path={} size={}", entry.relative_path, entry.size),
+    );
     Ok(())
 }
 
@@ -2882,6 +2998,10 @@ fn default_exclude_patterns() -> Vec<&'static str> {
         "**/.git/**",
         ".git/objects/**",
         "**/.git/objects/**",
+        ".team/runtime/**",
+        "**/.team/runtime/**",
+        ".team/logs/**",
+        "**/.team/logs/**",
         "node_modules/**",
         "**/node_modules/**",
         "target/**",
@@ -3284,6 +3404,8 @@ mod tests {
         write(&dir.path().join(".env.local"), b"SECRET=2\n");
         write(&dir.path().join("node_modules/pkg/index.js"), b"ignored");
         write(&dir.path().join(".git/objects/aa/object"), b"ignored");
+        write(&dir.path().join(".team/runtime/state.json"), b"ignored");
+        write(&dir.path().join(".team/logs/events.jsonl"), b"ignored");
         write(&dir.path().join("target/debug/app"), b"ignored");
 
         let manifest = scan_manifest(dir.path()).unwrap();

@@ -899,22 +899,28 @@ pub fn request_file_transfer(
 }
 
 #[tauri::command]
-pub fn pick_files_for_transfer(
+pub async fn pick_files_for_transfer(
     app: AppHandle,
-    backend: State<'_, Backend>,
     peer_name: String,
     confirmed_sensitive: Option<Vec<String>>,
 ) -> std::result::Result<Vec<String>, String> {
     use tauri_plugin_dialog::DialogExt;
     crate::backend::log_line("[file] file_picker_opened");
-    let paths: Vec<std::path::PathBuf> = app
-        .dialog()
-        .file()
-        .blocking_pick_files()
-        .unwrap_or_default()
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.dialog().file().pick_files(move |paths| {
+        let selected = paths
+            .unwrap_or_default()
+            .into_iter()
+            .map(|path| path.to_string())
+            .collect::<Vec<_>>();
+        let _ = tx.send(selected);
+    });
+    let paths: Vec<std::path::PathBuf> = rx
+        .recv()
+        .map_err(|error| error.to_string())?
         .into_iter()
-        .map(|path| path.into_path().map_err(|e| e.to_string()))
-        .collect::<std::result::Result<Vec<_>, _>>()?;
+        .map(std::path::PathBuf::from)
+        .collect();
     if paths.is_empty() {
         crate::backend::log_line("[file] file_picker_cancelled");
         return Ok(Vec::new());
@@ -931,7 +937,19 @@ pub fn pick_files_for_transfer(
             peer_name,
             path.display()
         ));
-        match backend.request_file_transfer(&peer_name, path.clone(), &confirmed) {
+        let app_handle = app.clone();
+        let peer = peer_name.clone();
+        let confirmed = confirmed.clone();
+        let send_path = path.clone();
+        let result = thread::spawn(move || {
+            app_handle
+                .state::<Backend>()
+                .request_file_transfer(&peer, send_path, &confirmed)
+                .map_err(|error| error.to_string())
+        })
+        .join()
+        .map_err(|_| "file transfer sender thread panicked".to_string())?;
+        match result {
             Ok(id) => transfer_ids.push(id),
             Err(error) => {
                 crate::backend::log_line(&format!(
@@ -1869,7 +1887,14 @@ pub fn set_project_mode(_project_id: String, _mode: String) {}
 pub fn save_exclude_rules(_project_id: String, _rules: Vec<String>) {}
 
 #[tauri::command]
-pub fn delete_project(_project_id: String) {}
+pub fn delete_project(
+    backend: State<Backend>,
+    project_id: String,
+) -> std::result::Result<(), String> {
+    backend
+        .delete_project(&project_id)
+        .map_err(|error| error.to_string())
+}
 
 // ── Serve daemon / peer endpoint / directory picker ──────────────────
 

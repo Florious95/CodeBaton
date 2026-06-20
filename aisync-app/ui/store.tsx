@@ -128,7 +128,14 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const [unreadFiles, setUnreadFiles] = useState<Record<string, number>>({});
 
   const appendChat = useCallback((peerName: string, e: ChatEntry) => {
-    setChatByPeer((prev) => ({ ...prev, [peerName]: [...(prev[peerName] ?? []), e] }));
+    setChatByPeer((prev) => {
+      const list = prev[peerName] ?? [];
+      const dup = list.some(
+        (x) => x.timestamp === e.timestamp && x.content === e.content && x.mine === e.mine,
+      );
+      if (dup) return prev;
+      return { ...prev, [peerName]: [...list, e] };
+    });
   }, []);
 
   const clearUnread = useCallback((peerName: string, which: "chat" | "files") => {
@@ -167,7 +174,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           });
           // 未读 +1；ChatTab 打开时会立即 clearUnread 清掉，所以不在会话里才会留。
           setUnreadChat((prev) => ({ ...prev, [m.senderName]: (prev[m.senderName] ?? 0) + 1 }));
-          setToast(`${m.senderName}: ${m.content}`);
+          const preview = m.content.length > 80 ? m.content.slice(0, 80) + "…" : m.content;
+          setToast(`${m.senderName}: ${preview}`);
           setTimeout(() => setToast(null), 2600);
         })
         .catch(() => {});
@@ -198,6 +206,31 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       if (!onboarded) setDialog({ kind: "wizard" });
     })();
   }, [refresh]);
+
+  // 对话历史持久化：从后端拉已存储的 text_messages，灌进 chatByPeer 做初始化。
+  // 只在 overview 变化时（含首次加载）执行，对每个已配对 peer 拉一次。
+  useEffect(() => {
+    if (!ipc.inTauri() || !overview) return;
+    const peerNames = [...new Set(overview.projects.map((p) => p.peerName).filter(Boolean))];
+    peerNames.forEach((name) => {
+      ipc
+        .textMessages(name)
+        .then((msgs) => {
+          if (!msgs || msgs.length === 0) return;
+          const entries: ChatEntry[] = msgs.map((m) => ({
+            senderName: m.mine ? "我" : m.senderName,
+            content: m.content,
+            timestamp: m.timestamp,
+            mine: !!m.mine,
+          }));
+          setChatByPeer((prev) => {
+            if ((prev[name]?.length ?? 0) >= entries.length) return prev;
+            return { ...prev, [name]: entries };
+          });
+        })
+        .catch(() => {});
+    });
+  }, [overview]);
 
   // Sync progress / result event stream (D9).
   useEffect(() => {

@@ -19,7 +19,7 @@ pub fn run() {
     // Startup banner to the file sink so qa can confirm logging works even when
     // the DMG is launched via `open -a` (stderr → /dev/null).
     backend::log_line("[aisync-app] starting — logs at ~/.aisync/logs/aisync.log");
-    let backend = Backend::new().expect("failed to initialize AISync backend");
+    let backend = Backend::new().expect("failed to initialize CodeBaton backend");
 
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
@@ -120,5 +120,5 @@ pub fn run() {
             commands::pick_directory,
         ])
         .run(tauri::generate_context!())
-        .expect("error while running AISync");
+        .expect("error while running CodeBaton");
 }

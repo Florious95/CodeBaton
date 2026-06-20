@@ -856,6 +856,20 @@ mod tests {
         fs::create_dir_all(root.join("target/debug")).unwrap();
         fs::write(root.join("target/debug/app"), "bin").unwrap();
         assert!(!recv_path_with_name(&rx, "app", Duration::from_millis(500)));
+        fs::create_dir_all(root.join(".team/runtime")).unwrap();
+        fs::write(root.join(".team/runtime/state.json"), "{}").unwrap();
+        assert!(!recv_path_with_name(
+            &rx,
+            "state.json",
+            Duration::from_millis(500)
+        ));
+        fs::create_dir_all(root.join(".team/logs")).unwrap();
+        fs::write(root.join(".team/logs/events.jsonl"), "{}").unwrap();
+        assert!(!recv_path_with_name(
+            &rx,
+            "events.jsonl",
+            Duration::from_millis(500)
+        ));
         watcher.stop();
     }
 

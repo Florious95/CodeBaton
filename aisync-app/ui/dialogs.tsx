@@ -23,7 +23,7 @@ import { fmtBytes, osLabel } from "./util";
 
 // ── D1: Add single-project mapping ───────────────────────────────────
 function AddProjectDialog() {
-  const { setDialog, refresh } = useStore();
+  const { setDialog, refresh, t } = useStore();
   // Real paired peers from getPeers() — not reverse-derived from existing
   // projects (which is empty on the first add). Peer NAME is the config key the
   // backend maps projects under, so we use it as the option value.
@@ -52,12 +52,12 @@ function AddProjectDialog() {
 
   return (
     <Dialog
-      title="添加项目映射"
+      title={t.addProjTitle}
       width={520}
       onClose={() => setDialog(null)}
       footer={
         <>
-          <button onClick={() => setDialog(null)}>取消</button>
+          <button onClick={() => setDialog(null)}>{t.cancel}</button>
           <button
             className="primary"
             disabled={!valid}
@@ -71,46 +71,46 @@ function AddProjectDialog() {
               try {
                 await submit(false);
                 ipc.uiLog("add_project_request_sent");
-                pushToast("已发送项目映射请求，等待对端选择目录");
+                pushToast(t.projReqSent);
                 setDialog(null);
               } catch (e) {
                 const msg = String(e);
                 // 本机目录不存在 → 提示，点确定才新建后重试。
                 if (msg.includes("local-dir-missing:")) {
                   ipc.uiLog("add_project_local_dir_missing");
-                  if (window.confirm(`本机目录不存在：\n${localDir}\n\n是否创建该目录并继续添加？`)) {
+                  if (window.confirm(t.localDirMissing(localDir))) {
                     try {
                       await submit(true);
                       ipc.uiLog("add_project_request_sent_after_mkdir");
                       await refresh();
-                      pushToast("已创建目录并发送项目映射请求");
+                      pushToast(t.mkdirAndSent);
                       setDialog(null);
                     } catch (e2) {
                       const m2 = String(e2);
                       ipc.uiLog(`add_project_failed error=${m2}`);
-                      pushToast(`添加失败：${m2}`);
+                      pushToast(t.addFailed(m2));
                     }
                   }
                 } else {
                   ipc.uiLog(`add_project_failed error=${msg}`);
-                  pushToast(`添加失败：${msg}`);
+                  pushToast(t.addFailed(msg));
                 }
               }
             }}
           >
-            添加
+            {t.addProject}
           </button>
         </>
       }
     >
       <div className="field">
-        <label>项目名称</label>
-        <input value={name} onChange={(e) => setName(e.target.value)} placeholder="可选，留空则使用目录名" />
+        <label>{t.projName}</label>
+        <input value={name} onChange={(e) => setName(e.target.value)} placeholder={t.projNamePlaceholder} />
       </div>
       <div className="field">
-        <label>本机目录</label>
+        <label>{t.localDir}</label>
         <div className="row">
-          <input value={localDir} onChange={(e) => setLocalDir(e.target.value)} placeholder="点「浏览」选择本机项目目录" />
+          <input value={localDir} onChange={(e) => setLocalDir(e.target.value)} placeholder={t.localDirPlaceholder} />
           <button
             onClick={async () => {
               ipc.uiLog("browse_clicked dialog=add_project");
@@ -120,13 +120,13 @@ function AddProjectDialog() {
                 ipc.uiLog(`path_selected dir=${dir}`);
               }
             }}
-          >浏览</button>
+          >{t.browse}</button>
         </div>
       </div>
       <div className="field">
-        <label>目标设备</label>
+        <label>{t.targetDevice}</label>
         <select value={peer} onChange={(e) => setPeer(e.target.value)}>
-          {peers.length === 0 && <option value="">（无配对设备 — 请先配对）</option>}
+          {peers.length === 0 && <option value="">{t.noPairedPeerPick}</option>}
           {peers.map((p) => (
             <option key={p.id} value={p.name}>
               {p.name}
@@ -135,11 +135,11 @@ function AddProjectDialog() {
         </select>
       </div>
       <div className="field">
-        <label>同步模式</label>
+        <label>{t.syncMode}</label>
         {[
-          ["twoWayAuto", "双向自动同步"],
-          ["oneWayPush", "单向推送（本机 → 对端）"],
-          ["oneWayPull", "单向推送（对端 → 本机）"],
+          ["twoWayAuto", t.twoWayAutoSync],
+          ["oneWayPush", t.oneWayPushLocal],
+          ["oneWayPull", t.oneWayPushRemote],
         ].map(([v, l]) => (
           <label className="radio" key={v}>
             <input type="radio" checked={mode === v} onChange={() => setMode(v)} />
@@ -148,11 +148,11 @@ function AddProjectDialog() {
         ))}
       </div>
       <div className="field">
-        <label>目标 AI 工具</label>
+        <label>{t.targetAiTool}</label>
         <select value={tool} onChange={(e) => setTool(e.target.value)}>
-          <option value="same">Claude Code (同工具)</option>
-          <option value="codex">转换为 Codex</option>
-          <option value="gemini">转换为 Gemini CLI</option>
+          <option value="same">{t.sameToolOpt}</option>
+          <option value="codex">{t.toCodex}</option>
+          <option value="gemini">{t.toGemini}</option>
         </select>
       </div>
     </Dialog>
@@ -166,7 +166,7 @@ function defaultRemoteRoot(os: string): string {
 }
 
 function AddWorkspaceDialog() {
-  const { setDialog, refresh } = useStore();
+  const { setDialog, refresh, t } = useStore();
   const [name, setName] = useState("");
   const [localRoot, setLocalRoot] = useState("");
   // Real paired peers (excludes the local machine); empty on first run. Track
@@ -217,12 +217,12 @@ function AddWorkspaceDialog() {
 
   return (
     <Dialog
-      title="添加工作区映射"
+      title={t.addWsTitle}
       width={560}
       onClose={() => setDialog(null)}
       footer={
         <>
-          <button onClick={() => setDialog(null)}>取消</button>
+          <button onClick={() => setDialog(null)}>{t.cancel}</button>
           <button
             className="primary"
             disabled={!localRoot.trim() || !peer.trim() || children.filter((c) => c.selected).length === 0}
@@ -233,33 +233,33 @@ function AddWorkspaceDialog() {
                 await ipc.addWorkspace({ name, localRoot, peer, remoteRoot, mode, autoEnable, children });
                 ipc.uiLog("add_workspace_saved");
                 await refresh();
-                pushToast(`已添加工作区（${sel} 个子项目）`);
+                pushToast(t.addedWorkspace(sel));
                 setDialog(null);
               } catch (e) {
                 const msg = String(e);
                 ipc.uiLog(`add_workspace_failed error=${msg}`);
-                pushToast(`添加工作区失败：${msg}`);
+                pushToast(t.addWsFailed(msg));
               }
             }}
           >
-            添加
+            {t.addProject}
           </button>
         </>
       }
     >
       <div className="field">
-        <label>工作区名称</label>
+        <label>{t.wsName}</label>
         <input value={name} onChange={(e) => setName(e.target.value)} />
       </div>
       <div className="field">
-        <label>本机根目录</label>
+        <label>{t.localRoot}</label>
         <div className="row">
           <input value={localRoot} onChange={(e) => setLocalRoot(e.target.value)} placeholder="~/projects" />
-          <button onClick={scan}>浏览</button>
+          <button onClick={scan}>{t.browse}</button>
         </div>
       </div>
       <div className="field">
-        <label>目标设备</label>
+        <label>{t.targetDevice}</label>
         <select
           value={peer}
           onChange={(e) => {
@@ -271,7 +271,7 @@ function AddWorkspaceDialog() {
             setRemoteRoot(defaultRemoteRoot(os));
           }}
         >
-          {pairedPeers.length === 0 && <option value="">（无配对设备）</option>}
+          {pairedPeers.length === 0 && <option value="">{t.noPairedPeer}</option>}
           {pairedPeers.map((p) => (
             <option key={p.id} value={p.name}>
               {p.name}
@@ -281,10 +281,10 @@ function AddWorkspaceDialog() {
       </div>
       {/* ISS-004: 「对端根目录」输入框已移除——有对端确认流程后，对端目录由对端
           自己在确认弹窗里选；主方不需要填。 */}
-      <div className="section-title">扫描到的子项目{children.length > 0 ? `（${children.length}）` : ""}</div>
+      <div className="section-title">{t.scannedChildren}{children.length > 0 ? `（${children.length}）` : ""}</div>
       {children.length === 0 ? (
         <p className="faint" style={{ fontSize: 12 }}>
-          选择本机根目录后点「浏览」自动扫描
+          {t.scanHint}
         </p>
       ) : (
         children.map((c, i) => (
@@ -305,21 +305,21 @@ function AddWorkspaceDialog() {
         ))
       )}
       <div className="field" style={{ marginTop: 14 }}>
-        <label>默认同步模式</label>
+        <label>{t.defaultSyncMode}</label>
         <select value={mode} onChange={(e) => setMode(e.target.value)}>
-          <option value="twoWayAuto">双向自动</option>
-          <option value="oneWayPush">单向推送</option>
+          <option value="twoWayAuto">{t.twoWayAuto}</option>
+          <option value="oneWayPush">{t.oneWayPush}</option>
         </select>
       </div>
       <div className="field">
-        <label>新子项目</label>
+        <label>{t.newChildren}</label>
         <label className="radio">
           <input type="radio" checked={autoEnable} onChange={() => setAutoEnable(true)} />
-          自动开启同步
+          {t.autoEnableSync}
         </label>
         <label className="radio">
           <input type="radio" checked={!autoEnable} onChange={() => setAutoEnable(false)} />
-          手动确认后开启
+          {t.manualEnable}
         </label>
       </div>
     </Dialog>
@@ -328,7 +328,7 @@ function AddWorkspaceDialog() {
 
 // ── D3: Enable a workspace child ─────────────────────────────────────
 function EnableChildDialog({ workspaceId, child }: { workspaceId: string; child: string }) {
-  const { setDialog, overview } = useStore();
+  const { setDialog, overview, t } = useStore();
   const ws = overview?.workspaces.find((w) => w.id === workspaceId);
   const c = ws?.children.find((x) => x.name === child);
   const [peer, setPeer] = useState(ws?.peerName ?? "");
@@ -337,49 +337,49 @@ function EnableChildDialog({ workspaceId, child }: { workspaceId: string; child:
 
   return (
     <Dialog
-      title="开启子项目同步"
+      title={t.enableChildTitle}
       width={440}
       onClose={() => setDialog(null)}
       footer={
         <>
-          <button onClick={() => setDialog(null)}>取消</button>
+          <button onClick={() => setDialog(null)}>{t.cancel}</button>
           <button
             className="primary"
             onClick={async () => {
               await ipc.enableChild(workspaceId, child, { peer, remote, mode }).catch(() => {});
-              pushToast(`已开启 ${child} 同步`);
+              pushToast(t.childEnabled(child));
               setDialog(null);
             }}
           >
-            开启
+            {t.enable}
           </button>
         </>
       }
     >
       <div className="detail-grid">
-        <span className="label">子项目</span>
+        <span className="label">{t.subProject}</span>
         <span>{child}</span>
         <span />
-        <span className="label">本机路径</span>
+        <span className="label">{t.localPath}</span>
         <span className="path">{c?.localDir}</span>
         <span />
       </div>
       <div className="field">
-        <label>目标设备</label>
+        <label>{t.targetDevice}</label>
         <select value={peer} onChange={(e) => setPeer(e.target.value)}>
-          {peer ? <option value={peer}>{peer}</option> : <option value="">（无配对设备）</option>}
+          {peer ? <option value={peer}>{peer}</option> : <option value="">{t.noPairedPeer}</option>}
         </select>
       </div>
       <div className="field">
-        <label>对端路径</label>
+        <label>{t.remotePath}</label>
         <input value={remote} onChange={(e) => setRemote(e.target.value)} />
-        <div className="hint">基于工作区映射自动填充，可修改</div>
+        <div className="hint">{t.remoteDirAutofill}</div>
       </div>
       <div className="field">
-        <label>同步模式</label>
+        <label>{t.syncMode}</label>
         <select value={mode} onChange={(e) => setMode(e.target.value)}>
-          <option value="twoWayAuto">双向自动</option>
-          <option value="oneWayPush">单向推送</option>
+          <option value="twoWayAuto">{t.twoWayAuto}</option>
+          <option value="oneWayPush">{t.oneWayPush}</option>
         </select>
       </div>
     </Dialog>
@@ -388,7 +388,7 @@ function EnableChildDialog({ workspaceId, child }: { workspaceId: string; child:
 
 // ── D4: Pairing confirmation (initiator view) ────────────────────────
 function PairingDialog({ peerId }: { peerId: string }) {
-  const { setDialog, refresh } = useStore();
+  const { setDialog, refresh, t } = useStore();
   const [pairing, setPairing] = useState<Pairing | null>(null);
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
@@ -405,13 +405,13 @@ function PairingDialog({ peerId }: { peerId: string }) {
         const msg = String(e);
         ipc.uiLog(`beginPairing threw peerId=${peerId} error=${msg}`);
         setError(msg);
-        pushToast(`配对失败：${msg}`);
+        pushToast(t.pairFailed(msg));
       });
   }, [peerId]);
 
   return (
     <Dialog
-      title="配对请求已发送"
+      title={t.pairReqSent}
       icon={<Link2 size={18} />}
       width={400}
       onClose={() => {
@@ -426,7 +426,7 @@ function PairingDialog({ peerId }: { peerId: string }) {
               setDialog(null);
             }}
           >
-            取消配对
+            {t.cancelPair}
           </button>
           <button
             className="primary"
@@ -437,53 +437,53 @@ function PairingDialog({ peerId }: { peerId: string }) {
                 await ipc.confirmPairing(peerId);
                 ipc.uiLog(`confirmPairing resolved peerId=${peerId}`);
                 await refresh();
-                pushToast(`已与 ${pairing?.peerName} 配对`);
+                pushToast(t.pairedWith(pairing?.peerName ?? ""));
                 setDialog(null);
               } catch (e) {
                 const msg = String(e);
                 ipc.uiLog(`confirmPairing threw peerId=${peerId} error=${msg}`);
-                pushToast(`确认配对失败：${msg}`);
+                pushToast(t.confirmPairFailed(msg));
               }
             }}
           >
-            确认配对
+            {t.confirmPair}
           </button>
         </>
       }
     >
       {error ? (
         <p className="muted" style={{ textAlign: "center", marginBottom: 10, color: "var(--red)" }}>
-          配对失败：{error}
+          {t.pairFailedLabel}{error}
         </p>
       ) : (
         <p className="muted" style={{ textAlign: "center", marginBottom: 10 }}>
-          {pairing ? "正在等待对方确认..." : "正在获取配对码..."}
+          {pairing ? t.waitingPeerConfirm : t.fetchingPairCode}
         </p>
       )}
       <div className="detail-grid">
-        <span className="label">目标设备</span>
+        <span className="label">{t.targetDevice}</span>
         <span>{pairing?.peerName}</span>
         <span />
-        <span className="label">IP 地址</span>
+        <span className="label">{t.ipAddress}</span>
         <span className="path">{pairing?.peerIp}</span>
         <span />
-        <span className="label">操作系统</span>
+        <span className="label">{t.osLabel}</span>
         <span>{osLabel(pairing?.peerOs ?? "")}</span>
         <span />
       </div>
       <p className="muted" style={{ fontSize: 12 }}>
-        请确认对方设备上显示的配对码：
+        {t.confirmPairCodeHint}
       </p>
       <div className="pairing-code">{pairing?.code ?? "····"}</div>
       <p className="faint" style={{ fontSize: 11, textAlign: "center" }}>
-        两端必须显示相同的配对码才能配对
+        {t.samePairCodeHint}
       </p>
     </Dialog>
   );
 }
 
 function ProjectMappingRequestDialog({ request }: { request: ProjectMappingRequest }) {
-  const { setDialog, refresh } = useStore();
+  const { setDialog, refresh, t } = useStore();
   // 默认填发起端发来的路径（两端目录结构通常一致），用户可改。目录不存在时
   // 点确认会由后端 mkdir -p 自动创建。
   const [localDir, setLocalDir] = useState(request.sourceDir ?? "");
@@ -492,14 +492,14 @@ function ProjectMappingRequestDialog({ request }: { request: ProjectMappingReque
 
   return (
     <Dialog
-      title="项目映射请求"
+      title={t.projMapReqTitle}
       icon={<FolderSearch size={18} />}
       width={520}
       onClose={() => setDialog(null)}
       footer={
         <>
           <button disabled={busy} onClick={() => setDialog(null)}>
-            稍后处理
+            {t.later}
           </button>
           <button
             className="primary"
@@ -512,42 +512,42 @@ function ProjectMappingRequestDialog({ request }: { request: ProjectMappingReque
                 );
                 await ipc.confirmProjectMappingRequest(request.requestId, localDir);
                 await refresh();
-                pushToast("已确认项目映射");
+                pushToast(t.projMapConfirmed);
                 setDialog(null);
               } catch (e) {
                 const msg = String(e);
                 ipc.uiLog(
                   `confirm_project_mapping failed requestId=${request.requestId} error=${msg}`,
                 );
-                pushToast(`确认失败：${msg}`);
+                pushToast(t.confirmFailed(msg));
               } finally {
                 setBusy(false);
               }
             }}
           >
-            确认映射
+            {t.confirmMap}
           </button>
         </>
       }
     >
       <div className="detail-grid">
-        <span className="label">发起设备</span>
+        <span className="label">{t.initiatorDevice}</span>
         <span>{request.peerName}</span>
         <span />
-        <span className="label">项目名称</span>
+        <span className="label">{t.projName}</span>
         <span>{request.projectName}</span>
         <span />
-        <span className="label">对端目录</span>
+        <span className="label">{t.remoteDir}</span>
         <span className="path">{request.sourceDir}</span>
         <span />
       </div>
       <div className="field">
-        <label>本机安放目录</label>
+        <label>{t.localPlaceDir}</label>
         <div className="row">
           <input
             value={localDir}
             onChange={(e) => setLocalDir(e.target.value)}
-            placeholder="选择本机用于同步该项目的目录"
+            placeholder={t.pickProjDirPlaceholder}
           />
           <button
             disabled={busy}
@@ -560,7 +560,7 @@ function ProjectMappingRequestDialog({ request }: { request: ProjectMappingReque
               }
             }}
           >
-            浏览
+            {t.browse}
           </button>
         </div>
       </div>
@@ -569,21 +569,21 @@ function ProjectMappingRequestDialog({ request }: { request: ProjectMappingReque
 }
 
 function WorkspaceMappingRequestDialog({ request }: { request: WorkspaceMappingRequest }) {
-  const { setDialog, refresh } = useStore();
+  const { setDialog, refresh, t } = useStore();
   const [localRoot, setLocalRoot] = useState(request.suggestedRemoteRoot ?? request.sourceRoot ?? "");
   const [busy, setBusy] = useState(false);
   const valid = localRoot.trim().length > 0;
 
   return (
     <Dialog
-      title="工作区映射请求"
+      title={t.wsMapReqTitle}
       icon={<FolderSearch size={18} />}
       width={560}
       onClose={() => setDialog(null)}
       footer={
         <>
           <button disabled={busy} onClick={() => setDialog(null)}>
-            稍后处理
+            {t.later}
           </button>
           <button
             className="primary"
@@ -596,45 +596,45 @@ function WorkspaceMappingRequestDialog({ request }: { request: WorkspaceMappingR
                 );
                 await ipc.confirmWorkspaceMappingRequest(request.requestId, localRoot);
                 await refresh();
-                pushToast("已确认工作区映射");
+                pushToast(t.wsMapConfirmed);
                 setDialog(null);
               } catch (e) {
                 const msg = String(e);
                 ipc.uiLog(
                   `confirm_workspace_mapping failed requestId=${request.requestId} error=${msg}`,
                 );
-                pushToast(`确认失败：${msg}`);
+                pushToast(t.confirmFailed(msg));
               } finally {
                 setBusy(false);
               }
             }}
           >
-            确认映射
+            {t.confirmMap}
           </button>
         </>
       }
     >
       <div className="detail-grid">
-        <span className="label">发起设备</span>
+        <span className="label">{t.initiatorDevice}</span>
         <span>{request.peerName}</span>
         <span />
-        <span className="label">工作区</span>
+        <span className="label">{t.workspace}</span>
         <span>{request.workspaceName}</span>
         <span />
-        <span className="label">对端根目录</span>
+        <span className="label">{t.remoteRoot}</span>
         <span className="path">{request.sourceRoot}</span>
         <span />
-        <span className="label">子项目</span>
+        <span className="label">{t.subProject}</span>
         <span>{request.children.length}</span>
         <span />
       </div>
       <div className="field">
-        <label>本机根目录</label>
+        <label>{t.localRoot}</label>
         <div className="row">
           <input
             value={localRoot}
             onChange={(e) => setLocalRoot(e.target.value)}
-            placeholder="选择本机用于同步该工作区的根目录"
+            placeholder={t.pickWsRootPlaceholder}
           />
           <button
             disabled={busy}
@@ -647,13 +647,13 @@ function WorkspaceMappingRequestDialog({ request }: { request: WorkspaceMappingR
               }
             }}
           >
-            浏览
+            {t.browse}
           </button>
         </div>
       </div>
       {request.children.length > 0 && (
         <div className="field">
-          <label>子项目</label>
+          <label>{t.subProject}</label>
           <p className="path">{request.children.join(", ")}</p>
         </div>
       )}
@@ -663,7 +663,7 @@ function WorkspaceMappingRequestDialog({ request }: { request: WorkspaceMappingR
 
 // ── D5: Split-brain conflict ─────────────────────────────────────────
 function ConflictDialog({ projectId }: { projectId: string }) {
-  const { setDialog, refresh } = useStore();
+  const { setDialog, refresh, t } = useStore();
   const [conflict, setConflict] = useState<Conflict | null>(null);
   const [choice, setChoice] = useState<string>("");
   useEffect(() => {
@@ -673,14 +673,14 @@ function ConflictDialog({ projectId }: { projectId: string }) {
 
   return (
     <Dialog
-      title="检测到冲突"
+      title={t.conflictTitle}
       icon={<AlertTriangle size={18} color="var(--amber)" />}
       width={560}
       closeOnOverlay={false}
       onClose={() => setDialog(null)}
       footer={
         <>
-          <button onClick={() => setDialog(null)}>取消</button>
+          <button onClick={() => setDialog(null)}>{t.cancel}</button>
           <button
             className={destructive ? "danger" : "primary"}
             disabled={!choice}
@@ -690,20 +690,20 @@ function ConflictDialog({ projectId }: { projectId: string }) {
               setDialog(null);
             }}
           >
-            {destructive ? "确认覆盖" : "执行"}
+            {destructive ? t.confirmOverwrite : t.execute}
           </button>
         </>
       }
     >
       <p style={{ marginBottom: 8 }}>
-        项目 “{conflict?.projectName}” 的两端都有未同步的变更，无法自动同步。
+        {t.conflictDesc(conflict?.projectName ?? "")}
       </p>
       <div className="conflict-cols">
         {[conflict?.local, conflict?.remote].map((side, i) => (
           <div className="conflict-col" key={i}>
             <h4>{side?.deviceName}</h4>
             <p className="muted" style={{ fontSize: 11, marginBottom: 6 }}>
-              上次同步后修改: {side?.changedFiles} 个文件
+              {t.changedAfterSync(side?.changedFiles ?? 0)}
             </p>
             {side?.files.map((f) => (
               <div className="file" key={f.path}>
@@ -712,18 +712,18 @@ function ConflictDialog({ projectId }: { projectId: string }) {
               </div>
             ))}
             <p className="faint" style={{ fontSize: 11, marginTop: 6 }}>
-              会话: {side?.sessionSummary}
+              {t.sessionLabel(side?.sessionSummary ?? "")}
             </p>
           </div>
         ))}
       </div>
       <p className="muted" style={{ fontSize: 12, marginTop: 6 }}>
-        请选择如何处理：
+        {t.chooseHow}
       </p>
       {[
-        ["local", "以本机为准（对端变更将被覆盖）"],
-        ["remote", "以对端为准（本机变更将被覆盖）"],
-        ["none", "暂不处理（保持两端各自的状态）"],
+        ["local", t.preferLocal],
+        ["remote", t.preferRemote],
+        ["none", t.preferNone],
       ].map(([v, l]) => (
         <label className="radio" key={v}>
           <input type="radio" checked={choice === v} onChange={() => setChoice(v)} />
@@ -731,7 +731,7 @@ function ConflictDialog({ projectId }: { projectId: string }) {
         </label>
       ))}
       {destructive && (
-        <div className="warn-box">⚠ 被覆盖的一方变更将不可恢复，建议先手动备份</div>
+        <div className="warn-box">{t.overwriteWarn}</div>
       )}
     </Dialog>
   );
@@ -739,7 +739,7 @@ function ConflictDialog({ projectId }: { projectId: string }) {
 
 // ── D6: Batch sync confirmation (G6 sensitive-file opt-in) ───────────
 function BatchDialog({ peerId, direction }: { peerId: string; direction: "push" | "pull" }) {
-  const { setDialog } = useStore();
+  const { setDialog, t } = useStore();
   const [plan, setPlan] = useState<BatchPlan | null>(null);
   const [selected, setSelected] = useState<Record<string, boolean>>({});
   const [sensitiveOptIn, setSensitiveOptIn] = useState<Record<string, boolean>>({});
@@ -752,19 +752,19 @@ function BatchDialog({ peerId, direction }: { peerId: string; direction: "push" 
     });
   }, [peerId, direction]);
 
-  const verb = direction === "pull" ? "拉取" : "推送";
+  const verb = direction === "pull" ? t.pull : t.push;
   const chosen = (plan?.items ?? []).filter((i) => selected[i.projectId] && !i.upToDate);
   const totalFiles = chosen.reduce((s, i) => s + i.changedFiles, 0);
   const totalBytes = chosen.reduce((s, i) => s + i.bytes, 0);
 
   return (
     <Dialog
-      title={`批量${verb}确认`}
+      title={t.batchTitle(verb)}
       width={480}
       onClose={() => setDialog(null)}
       footer={
         <>
-          <button onClick={() => setDialog(null)}>取消</button>
+          <button onClick={() => setDialog(null)}>{t.cancel}</button>
           <button
             className="primary"
             onClick={async () => {
@@ -781,13 +781,13 @@ function BatchDialog({ peerId, direction }: { peerId: string; direction: "push" 
               setDialog({ kind: "syncProgress" });
             }}
           >
-            开始{verb}
+            {t.start}{verb}
           </button>
         </>
       }
     >
       <p className="muted" style={{ marginBottom: 10 }}>
-        即将{direction === "pull" ? `从 ${plan?.peerName}` : `向 ${plan?.peerName}`}{verb}以下项目：
+        {t.batchIntro(direction === "pull" ? t.fromPeer(plan?.peerName ?? "") : t.toPeer(plan?.peerName ?? ""), verb)}
       </p>
       {plan?.items.map((i) => (
         <label className="check" key={i.projectId}>
@@ -799,20 +799,20 @@ function BatchDialog({ peerId, direction }: { peerId: string; direction: "push" 
           />
           <span style={{ flex: 1 }}>{i.name}</span>
           <span className="muted" style={{ fontSize: 11 }}>
-            {i.upToDate ? "(已是最新)" : `${i.changedFiles} 个文件变更  ~${fmtBytes(i.bytes)}`}
+            {i.upToDate ? t.upToDate : t.changedFilesApprox(i.changedFiles, fmtBytes(i.bytes))}
           </span>
         </label>
       ))}
-      <div className="section-title">总计</div>
+      <div className="section-title">{t.total}</div>
       <p className="muted" style={{ fontSize: 12 }}>
-        {totalFiles} 个文件  约 {fmtBytes(totalBytes)}
+        {t.totalSummary(totalFiles, fmtBytes(totalBytes))}
       </p>
 
       {plan && plan.sensitiveFiles.length > 0 && (
         <div className="warn-box" style={{ marginTop: 12 }}>
           <div className="row" style={{ gap: 6 }}>
             <ShieldAlert size={14} />
-            <strong>以下文件匹配敏感文件模式：</strong>
+            <strong>{t.sensitiveMatched}</strong>
           </div>
           {plan.sensitiveFiles.map((f) => (
             <label className="check" key={f}>
@@ -822,7 +822,7 @@ function BatchDialog({ peerId, direction }: { peerId: string; direction: "push" 
                 onChange={() => setSensitiveOptIn({ ...sensitiveOptIn, [f]: !sensitiveOptIn[f] })}
               />
               <span className="path" style={{ color: "var(--amber)" }}>
-                包含此文件 — {f}
+                {t.includeThisFile(f)}
               </span>
             </label>
           ))}
@@ -834,56 +834,56 @@ function BatchDialog({ peerId, direction }: { peerId: string; direction: "push" 
 
 // ── D7: Edit exclude rules ───────────────────────────────────────────
 function ExcludeRulesDialog({ projectId }: { projectId: string }) {
-  const { setDialog, overview } = useStore();
+  const { setDialog, overview, t } = useStore();
   const project = overview?.projects.find((p) => p.id === projectId);
   const [rules, setRules] = useState((project?.excludeRules ?? []).join("\n"));
 
   return (
     <Dialog
-      title={`排除规则 — ${project?.name ?? ""}`}
+      title={t.excludeRulesTitle(project?.name ?? "")}
       width={480}
       onClose={() => setDialog(null)}
       footer={
         <>
-          <button onClick={() => setDialog(null)}>取消</button>
+          <button onClick={() => setDialog(null)}>{t.cancel}</button>
           <button
             className="primary"
             onClick={async () => {
               await ipc.saveExcludeRules(projectId, rules.split("\n").filter(Boolean)).catch(() => {});
-              pushToast("已保存排除规则");
+              pushToast(t.excludeSaved);
               setDialog(null);
             }}
           >
-            保存
+            {t.save}
           </button>
         </>
       }
     >
-      <div className="section-title">全局规则（从设置继承，只读）</div>
+      <div className="section-title">{t.globalRulesRO}</div>
       <p className="path" style={{ marginBottom: 10 }}>
         node_modules/ .git/objects/ target/ __pycache__/ .next/ dist/ build/ .DS_Store
       </p>
-      <div className="section-title">项目专属规则</div>
+      <div className="section-title">{t.projSpecificRules}</div>
       <textarea rows={6} value={rules} onChange={(e) => setRules(e.target.value)} />
-      <div className="hint">每行一条 glob 模式</div>
+      <div className="hint">{t.globPerLine}</div>
     </Dialog>
   );
 }
 
 // ── D8: Unpair confirmation ──────────────────────────────────────────
 function UnpairDialog({ peerId }: { peerId: string }) {
-  const { setDialog, setView, refresh, overview } = useStore();
+  const { setDialog, setView, refresh, overview, t } = useStore();
   const name =
-    overview?.projects.find((p) => p.peerId === peerId)?.peerName ?? "该设备";
+    overview?.projects.find((p) => p.peerId === peerId)?.peerName ?? t.thisDevice;
   return (
     <Dialog
-      title="解除配对"
+      title={t.unpairTitle}
       width={420}
       closeOnOverlay={false}
       onClose={() => setDialog(null)}
       footer={
         <>
-          <button onClick={() => setDialog(null)}>取消</button>
+          <button onClick={() => setDialog(null)}>{t.cancel}</button>
           <button
             className="danger"
             onClick={async () => {
@@ -893,17 +893,17 @@ function UnpairDialog({ peerId }: { peerId: string }) {
               setDialog(null);
             }}
           >
-            解除配对
+            {t.unpair}
           </button>
         </>
       }
     >
-      <p style={{ marginBottom: 10 }}>确定要解除与 {name} 的配对吗？</p>
+      <p style={{ marginBottom: 10 }}>{t.unpairConfirm(name)}</p>
       <p className="muted" style={{ fontSize: 12, lineHeight: 1.8 }}>
-        解除后：
-        <br />• 该设备的所有项目映射将被删除
-        <br />• 已同步到对端的文件不会被删除
-        <br />• 如需重新配对，需要再次确认配对码
+        {t.unpairAfter}
+        <br />• {t.unpairBullet1}
+        <br />• {t.unpairBullet2}
+        <br />• {t.unpairBullet3}
       </p>
     </Dialog>
   );
@@ -911,13 +911,13 @@ function UnpairDialog({ peerId }: { peerId: string }) {
 
 // ── D9: Sync progress + result view ──────────────────────────────────
 function SyncProgressDialog() {
-  const { setDialog, syncProgress, lastResult, clearResult } = useStore();
+  const { setDialog, syncProgress, lastResult, clearResult, t } = useStore();
 
   if (lastResult) {
     const ok = lastResult.success;
     return (
       <Dialog
-        title={ok ? "同步完成" : "同步失败"}
+        title={ok ? t.syncDone : t.syncFailed}
         icon={ok ? <CheckCircle2 size={18} color="var(--accent)" /> : <XCircle size={18} color="var(--red)" />}
         width={480}
         onClose={() => {
@@ -932,7 +932,7 @@ function SyncProgressDialog() {
               setDialog(null);
             }}
           >
-            关闭
+            {t.close}
           </button>
         }
       >
@@ -942,33 +942,33 @@ function SyncProgressDialog() {
         {ok ? (
           <>
             <div className="detail-grid">
-              <span className="label">传输文件</span>
-              <span>{lastResult.files} 个</span>
+              <span className="label">{t.transferredFiles}</span>
+              <span>{lastResult.files} {t.count}</span>
               <span />
-              <span className="label">传输数据</span>
+              <span className="label">{t.transferredData}</span>
               <span>{fmtBytes(lastResult.bytes)}</span>
               <span />
-              <span className="label">耗时</span>
-              <span>{lastResult.elapsedSecs} 秒</span>
+              <span className="label">{t.elapsed}</span>
+              <span>{lastResult.elapsedSecs} {t.secs}</span>
               <span />
-              <span className="label">路径重写</span>
-              <span>{lastResult.rewrittenPaths} 处</span>
+              <span className="label">{t.pathRewrite}</span>
+              <span>{lastResult.rewrittenPaths} {t.places}</span>
               <span />
             </div>
             {lastResult.skippedPaths > 0 && (
               <div className="warn-box">
-                ⚠ {lastResult.skippedPaths} 处路径未能确定是否需要重写（低置信度），已跳过{" "}
+                {t.skippedRewriteWarn(lastResult.skippedPaths)}{" "}
                 <button
                   className="ghost tiny"
                   onClick={() => setDialog({ kind: "rewriteReport", projectId: lastResult.projectId })}
                 >
-                  查看详情 →
+                  {t.viewDetails}
                 </button>
               </div>
             )}
           </>
         ) : (
-          <div className="warn-box">{lastResult.error ?? "未知错误"}</div>
+          <div className="warn-box">{lastResult.error ?? t.unknownError}</div>
         )}
       </Dialog>
     );
@@ -977,13 +977,13 @@ function SyncProgressDialog() {
   const p = syncProgress;
   return (
     <Dialog
-      title="同步进行中"
+      title={t.syncInProgress}
       width={480}
       closeOnOverlay={false}
       onClose={() => setDialog(null)}
       footer={
         <>
-          <button onClick={() => setDialog(null)}>最小化到后台</button>
+          <button onClick={() => setDialog(null)}>{t.minimizeToBackground}</button>
           <button
             className="danger"
             onClick={() => {
@@ -991,42 +991,42 @@ function SyncProgressDialog() {
               setDialog(null);
             }}
           >
-            取消同步
+            {t.cancelSync}
           </button>
         </>
       }
     >
-      <p style={{ marginBottom: 10 }}>{p?.direction ?? "准备中..."}</p>
+      <p style={{ marginBottom: 10 }}>{p?.direction ?? t.preparing}</p>
       <p className="muted" style={{ fontSize: 12, marginBottom: 6 }}>
-        阶段: {p?.phase}
+        {t.phaseLabel(p?.phase ?? "")}
       </p>
       <div className="bar">
         <div style={{ width: `${p?.percent ?? 0}%` }} />
       </div>
       <div className="detail-grid" style={{ marginTop: 14 }}>
-        <span className="label">已传输</span>
+        <span className="label">{t.transferred}</span>
         <span>
-          {p?.filesDone ?? 0} / {p?.filesTotal ?? 0} 个文件
+          {t.filesProgress(p?.filesDone ?? 0, p?.filesTotal ?? 0)}
         </span>
         <span />
-        <span className="label">数据量</span>
+        <span className="label">{t.dataAmount}</span>
         <span>
           {fmtBytes(p?.bytesDone ?? 0)} / {fmtBytes(p?.bytesTotal ?? 0)}
         </span>
         <span />
-        <span className="label">速度</span>
+        <span className="label">{t.speed}</span>
         <span>{fmtBytes(p?.speedBps ?? 0)}/s</span>
         <span />
-        <span className="label">预计剩余</span>
-        <span>~{p?.etaSecs ?? 0} 秒</span>
+        <span className="label">{t.etaLabel}</span>
+        <span>{t.etaSecs(p?.etaSecs ?? 0)}</span>
         <span />
       </div>
       {p?.currentFile && (
         <p className="path" style={{ marginTop: 8 }}>
-          当前: {p.currentFile}
+          {t.currentFile(p.currentFile)}
         </p>
       )}
-      <div className="section-title">阶段进度</div>
+      <div className="section-title">{t.stageProgress}</div>
       {p?.stages.map((s) => (
         <div className="row" key={s.name} style={{ padding: "3px 0" }}>
           <span style={{ width: 18 }}>{s.done ? "✓" : s.active ? "◐" : "○"}</span>
@@ -1040,7 +1040,7 @@ function SyncProgressDialog() {
 
 // ── D10: Path-rewrite report (G7) ────────────────────────────────────
 function RewriteReportDialog({ projectId }: { projectId: string }) {
-  const { setDialog } = useStore();
+  const { setDialog, t } = useStore();
   const [report, setReport] = useState<RewriteReport | null>(null);
   useEffect(() => {
     ipc.getRewriteReport(projectId).then(setReport).catch(() => {});
@@ -1048,15 +1048,15 @@ function RewriteReportDialog({ projectId }: { projectId: string }) {
 
   return (
     <Dialog
-      title="路径重写报告"
+      title={t.rewriteReportTitle}
       width={640}
       onClose={() => setDialog(null)}
-      footer={<button className="primary" onClick={() => setDialog(null)}>关闭</button>}
+      footer={<button className="primary" onClick={() => setDialog(null)}>{t.close}</button>}
     >
       <p className="muted" style={{ fontSize: 12 }}>
         {report?.projectName}  {report?.timestamp}  {report?.direction}
       </p>
-      <div className="section-title">已重写 ({report?.rewritten.length ?? 0} 处)</div>
+      <div className="section-title">{t.rewrittenCount(report?.rewritten.length ?? 0)}</div>
       {report?.rewritten.map((r, i) => (
         <div className="rewrite-entry" key={i}>
           <div className="loc">
@@ -1066,14 +1066,14 @@ function RewriteReportDialog({ projectId }: { projectId: string }) {
           <div className="after">→ {r.after}</div>
         </div>
       ))}
-      <div className="section-title">已跳过 ({report?.skipped.length ?? 0} 处，低置信度)</div>
+      <div className="section-title">{t.skippedCount(report?.skipped.length ?? 0)}</div>
       {report?.skipped.map((s, i) => (
         <div className="rewrite-entry" key={i}>
           <div className="loc">
             {s.location}  {s.field}
           </div>
           <div className="path">"{s.snippet}"</div>
-          <div className="reason">原因: {s.reason}</div>
+          <div className="reason">{t.reasonLabel(s.reason)}</div>
         </div>
       ))}
     </Dialog>
@@ -1082,37 +1082,37 @@ function RewriteReportDialog({ projectId }: { projectId: string }) {
 
 // ── D11: Newly discovered child projects ─────────────────────────────
 function DiscoveredDialog({ workspaceId }: { workspaceId: string }) {
-  const { setDialog, overview } = useStore();
+  const { setDialog, overview, t } = useStore();
   const ws = overview?.workspaces.find((w) => w.id === workspaceId);
   const discovered = (ws?.children ?? []).filter((c) => c.newlyDiscovered);
   const [sel, setSel] = useState<Record<string, boolean>>({});
 
   return (
     <Dialog
-      title="新发现的子项目"
+      title={t.discoveredTitle}
       icon={<FolderSearch size={18} />}
       width={480}
       onClose={() => setDialog(null)}
       footer={
         <>
-          <button onClick={() => setDialog(null)}>忽略全部</button>
+          <button onClick={() => setDialog(null)}>{t.ignoreAll}</button>
           <button
             className="primary"
             onClick={async () => {
               for (const c of discovered) {
                 if (sel[c.name]) await ipc.enableChild(workspaceId, c.name, {}).catch(() => {});
               }
-              pushToast("已开启选中的子项目");
+              pushToast(t.selectedEnabled);
               setDialog(null);
             }}
           >
-            开启选中项
+            {t.enableSelected}
           </button>
         </>
       }
     >
       <p className="muted" style={{ marginBottom: 10 }}>
-        工作区 {ws?.localRoot} 中发现了以下新的子目录：
+        {t.discoveredIntro(ws?.localRoot ?? "")}
       </p>
       {discovered.map((c) => (
         <label className="check" key={c.name}>
@@ -1120,15 +1120,13 @@ function DiscoveredDialog({ workspaceId }: { workspaceId: string }) {
           <div>
             <div>{c.name}/</div>
             <div className="path">
-              创建于 {c.discoveredAt} · 对端可能的路径: {c.remoteDir}
+              {t.discoveredAtRemote(c.discoveredAt ?? "", c.remoteDir ?? "")}
             </div>
           </div>
         </label>
       ))}
       <div className="warn-box" style={{ color: "var(--text-dim)", background: "transparent", border: "1px solid var(--border)" }}>
-        选中的子项目将使用工作区默认设置开启同步。
-        <br />
-        同步模式: 双向自动 · 目标设备: {ws?.peerName}
+        <span style={{ whiteSpace: "pre-line" }}>{t.discoveredHint(ws?.peerName ?? "")}</span>
       </div>
     </Dialog>
   );
@@ -1136,7 +1134,7 @@ function DiscoveredDialog({ workspaceId }: { workspaceId: string }) {
 
 // ── D12: First-run wizard (3 steps) ──────────────────────────────────
 function WizardDialog() {
-  const { setDialog, refresh, overview } = useStore();
+  const { setDialog, refresh, overview, t: tr } = useStore();
   const [step, setStep] = useState(1);
   const [name, setName] = useState(overview?.local.deviceName ?? "");
   const local = overview?.local;
@@ -1150,16 +1148,16 @@ function WizardDialog() {
 
   return (
     <Dialog
-      title={`欢迎使用 CodeBaton — Step ${step}/3`}
+      title={tr.wizardTitle(step)}
       width={560}
       closeOnOverlay={false}
       onClose={() => {}}
       footer={
         <>
-          {step > 1 && <button onClick={() => setStep(step - 1)}>上一步</button>}
+          {step > 1 && <button onClick={() => setStep(step - 1)}>{tr.prevStep}</button>}
           {step < 3 ? (
             <button className="primary" onClick={() => setStep(step + 1)}>
-              下一步
+              {tr.nextStep}
             </button>
           ) : (
             <button
@@ -1170,7 +1168,7 @@ function WizardDialog() {
                 setDialog(null);
               }}
             >
-              完成
+              {tr.done}
             </button>
           )}
         </>
@@ -1179,22 +1177,22 @@ function WizardDialog() {
       {step === 1 && (
         <>
           <p className="muted" style={{ marginBottom: 12 }}>
-            为这台设备设置一个名称，方便在其他设备上识别它：
+            {tr.nameThisDevice}
           </p>
           <div className="field">
-            <label>设备名称</label>
+            <label>{tr.deviceName}</label>
             <input value={name} onChange={(e) => setName(e.target.value)} />
-            <div className="hint">建议使用容易辨别的名称</div>
+            <div className="hint">{tr.nameHint}</div>
           </div>
-          <div className="section-title">检测到的信息</div>
+          <div className="section-title">{tr.detectedInfo}</div>
           <div className="detail-grid">
-            <span className="label">操作系统</span>
+            <span className="label">{tr.osLabel}</span>
             <span>{local?.osVersion}</span>
             <span />
-            <span className="label">用户名</span>
+            <span className="label">{tr.username}</span>
             <span>{local?.user}</span>
             <span />
-            <span className="label">局域网 IP</span>
+            <span className="label">{tr.lanIp}</span>
             <span className="path">{local?.ip}</span>
             <span />
           </div>
@@ -1203,37 +1201,37 @@ function WizardDialog() {
       {step === 2 && (
         <>
           <p className="muted" style={{ marginBottom: 12 }}>
-            检测到以下 AI 编程工具：
+            {tr.detectedTools}
           </p>
           {tools.map((t) => (
             <div className="tool-row" key={t.name}>
               <span>
                 {t.installed ? "✓" : "✗"} {t.name}
               </span>
-              <span className="path">{t.installed ? t.configDir : "未安装"}</span>
-              <span className="muted">{t.installed ? `${t.sessionCount} 个项目会话` : ""}</span>
+              <span className="path">{t.installed ? t.configDir : tr.notInstalled}</span>
+              <span className="muted">{t.installed ? tr.sessionsCount(t.sessionCount) : ""}</span>
               <span />
             </div>
           ))}
           <p className="faint" style={{ fontSize: 12, marginTop: 12 }}>
-            这些路径将用于同步会话数据。如果路径不正确，可以在设置中修改。
+            {tr.pathsForSync}
           </p>
         </>
       )}
       {step === 3 && (
         <>
           <p style={{ lineHeight: 2 }}>
-            ✓ 设备已注册为 “{name}”
-            <br />✓ 已检测到 {tools.filter((t) => t.installed).length} 个 AI 工具
-            <br />✓ mDNS 服务已启动，正在局域网中广播
+            ✓ {tr.registeredAs(name)}
+            <br />✓ {tr.detectedToolsN(tools.filter((t) => t.installed).length)}
+            <br />✓ {tr.mdnsStarted}
           </p>
-          <div className="section-title">下一步</div>
+          <div className="section-title">{tr.nextStepTitle}</div>
           <p className="muted" style={{ fontSize: 12, lineHeight: 1.8 }}>
-            在另一台设备上安装并运行 CodeBaton，两台设备将自动发现彼此。然后在侧边栏中点击发现的设备进行配对。
+            {tr.wizardNext}
           </p>
-          <div className="section-title">当前局域网中的设备</div>
+          <div className="section-title">{tr.devicesOnLan}</div>
           <p className="faint" style={{ fontSize: 12 }}>
-            正在扫描...
+            {tr.scanning}
           </p>
         </>
       )}

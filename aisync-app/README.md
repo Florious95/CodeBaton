@@ -1,6 +1,6 @@
-# aisync-app — AISync 桌面应用 (Tauri v2)
+# aisync-app — CodeBaton 桌面应用 (Tauri v2)
 
-Tauri v2 + React + TypeScript (Vite) 实现的 AISync 桌面 GUI。实现了 ui-design.md
+Tauri v2 + React + TypeScript (Vite) 实现的 CodeBaton 桌面 GUI。实现了 ui-design.md
 中定义的全部页面 (P1–P3)、弹窗 (D1–D12)、系统托盘、底部状态栏、键盘快捷键与系统通知。
 
 ## 运行

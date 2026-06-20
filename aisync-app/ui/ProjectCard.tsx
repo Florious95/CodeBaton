@@ -1,13 +1,23 @@
 import { useState } from "react";
 import { ChevronRight } from "lucide-react";
 import { ipc } from "./ipc";
-import { useStore } from "./store";
+import { useStore, pushToast } from "./store";
 import type { Project } from "./types";
-import { fmtBytes, modeLabel } from "./util";
+import { fmtBytes, fmtTime, modeLabel } from "./util";
 
 export function ProjectCard({ project }: { project: Project }) {
-  const { setDialog, setSelectedProjectId, t } = useStore();
+  const { setDialog, setSelectedProjectId, refresh, t } = useStore();
   const [open, setOpen] = useState(false);
+
+  const remove = async () => {
+    setOpen(false);
+    try {
+      await ipc.deleteProject(project.id);
+      await refresh();
+    } catch (e) {
+      pushToast(`${t.deleteFailed}: ${e}`);
+    }
+  };
 
   const sync = (direction: "push" | "pull") => {
     setSelectedProjectId(project.id);
@@ -43,7 +53,7 @@ export function ProjectCard({ project }: { project: Project }) {
         <div className="proj-meta indent" onClick={(e) => e.stopPropagation()}>
           {project.lastSync && (
             <span className="faint">
-              {t.last}: {project.lastSync}
+              {t.last}: {fmtTime(project.lastSync)}
             </span>
           )}
           <span className="faint">
@@ -93,8 +103,8 @@ export function ProjectCard({ project }: { project: Project }) {
 
           <div className="section-title">{t.recentSync}</div>
           {project.history.map((h, i) => (
-            <div className="history-row" key={i}>
-              <span>{h.timestamp}</span>
+            <div className="history-row pc-history-row" key={i}>
+              <span>{fmtTime(h.timestamp)}</span>
               <span>
                 {h.direction === "push" ? "→" : "←"} {project.peerName}
               </span>
@@ -114,10 +124,7 @@ export function ProjectCard({ project }: { project: Project }) {
             <span style={{ flex: 1 }} />
             <button
               className="danger"
-              onClick={() => {
-                ipc.deleteProject(project.id);
-                setOpen(false);
-              }}
+              onClick={remove}
             >
               {t.deleteMapping}
             </button>

@@ -9,7 +9,7 @@ import { ChatTab } from "../ChatTab";
 import { FileTransferTab } from "../FileTransferTab";
 
 export function PeerDetailPage({ peerId }: { peerId: string }) {
-  const { setDialog, unreadChat, unreadFiles } = useStore();
+  const { setDialog, unreadChat, unreadFiles, t } = useStore();
   const [peer, setPeer] = useState<Peer | null>(null);
   const [projects, setProjects] = useState<Project[]>([]);
   const [history, setHistory] = useState<SyncHistoryEntry[]>([]);
@@ -34,7 +34,7 @@ export function PeerDetailPage({ peerId }: { peerId: string }) {
     return () => clearInterval(timer);
   }, [peerId]);
 
-  if (!peer) return <div className="empty">设备不存在</div>;
+  if (!peer) return <div className="empty">{t.peerNotFound}</div>;
   const online = peer.status === "online";
   // ISS-009: 对端 Claude 目录优先用项目映射推导出的真实路径；否则按惯例显示
   // ~/.claude/（两端同为 macOS，默认目录一致），不再显示占位说明。
@@ -52,13 +52,13 @@ export function PeerDetailPage({ peerId }: { peerId: string }) {
         </span>
       </div>
       <p className="muted" style={{ fontSize: 12, display: "flex", alignItems: "center", gap: 6 }}>
-        <span>状态:</span>
+        <span>{t.statusLabel}</span>
         {/* ISS-373: 在线点用品牌绿 #3ecf8e，离线用空心灰点 */}
         <span className="status">
           <span className={`dot ${online ? "online" : "offline"}`} />
-          {online ? "在线" : "离线"}
+          {online ? t.online : t.offline}
         </span>
-        {pairedAt && <span className="faint">· 配对于 {fmtTime(pairedAt)}</span>}
+        {pairedAt && <span className="faint">{t.pairedAt(fmtTime(pairedAt))}</span>}
       </p>
 
       {/* ISS-013: Tab 页签 —「映射关系」｜「同步历史」 */}
@@ -67,19 +67,19 @@ export function PeerDetailPage({ peerId }: { peerId: string }) {
           className={`tab ${tab === "mappings" ? "active" : ""}`}
           onClick={() => setTab("mappings")}
         >
-          映射关系
+          {t.tabMappings}
         </button>
         <button
           className={`tab ${tab === "history" ? "active" : ""}`}
           onClick={() => setTab("history")}
         >
-          同步历史
+          {t.tabHistory}
         </button>
         <button
           className={`tab ${tab === "chat" ? "active" : ""}`}
           onClick={() => setTab("chat")}
         >
-          对话
+          {t.tabChat}
           {(unreadChat[peer.name] ?? 0) > 0 && (
             <span className="badge">{unreadChat[peer.name]}</span>
           )}
@@ -88,7 +88,7 @@ export function PeerDetailPage({ peerId }: { peerId: string }) {
           className={`tab ${tab === "files" ? "active" : ""}`}
           onClick={() => setTab("files")}
         >
-          文件传输
+          {t.tabFiles}
           {(unreadFiles[peer.name] ?? 0) > 0 && (
             <span className="badge">{unreadFiles[peer.name]}</span>
           )}
@@ -100,22 +100,22 @@ export function PeerDetailPage({ peerId }: { peerId: string }) {
 
       {tab === "mappings" && (
       <>
-      <div className="section-title">Claude 配置映射</div>
+      <div className="section-title">{t.claudeMap}</div>
       <div className="card">
         <div className="detail-grid">
-          <span className="label">本机</span>
+          <span className="label">{t.localM}</span>
           <span className="path">~/.claude/</span>
           <span />
-          <span className="label">对端</span>
+          <span className="label">{t.remoteM}</span>
           <span className="path">{remoteSessionDir}</span>
           <span />
         </div>
       </div>
 
-      <div className="section-title">项目映射</div>
+      <div className="section-title">{t.projMap}</div>
       {projects.length === 0 ? (
         <p className="faint" style={{ fontSize: 12 }}>
-          暂无项目映射
+          {t.noProjMap}
         </p>
       ) : (
         projects.map((p) =>
@@ -131,7 +131,7 @@ export function PeerDetailPage({ peerId }: { peerId: string }) {
                   </div>
                   <div className="row" style={{ marginTop: 6 }}>
                     <span className={`status-pill ${p.status}`}>
-                      {p.status === "synced" ? "● 已同步" : p.status === "syncing" ? `◐ 同步中 ${p.progress}%` : "○"}
+                      {p.status === "synced" ? t.pillSynced : p.status === "syncing" ? t.pillSyncing(p.progress ?? 0) : t.pillIdle}
                     </span>
                     <span className="faint">{modeLabel(p.mode)}</span>
                   </div>
@@ -141,7 +141,7 @@ export function PeerDetailPage({ peerId }: { peerId: string }) {
                   style={{ flex: "none", whiteSpace: "nowrap" }}
                   onClick={() => setManaged(p.id)}
                 >
-                  管理
+                  {t.manage}
                 </button>
               </div>
             </div>
@@ -149,12 +149,12 @@ export function PeerDetailPage({ peerId }: { peerId: string }) {
         )
       )}
       <div className="btn-group" style={{ justifyContent: "flex-end" }}>
-        <button onClick={() => setDialog({ kind: "addProject" })}>+ 添加项目映射</button>
+        <button onClick={() => setDialog({ kind: "addProject" })}>{"+ "}{t.addProjMap}</button>
       </div>
 
       {workspaces.length > 0 && (
         <>
-          <div className="section-title">工作区映射</div>
+          <div className="section-title">{t.workspaceMap}</div>
           {workspaces.map((ws) => {
             const open = wsOpen[ws.id] ?? true;
             return (
@@ -166,7 +166,7 @@ export function PeerDetailPage({ peerId }: { peerId: string }) {
                   <span className="chev">
                     {open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
                   </span>
-                  <strong>工作区: </strong>
+                  <strong>{t.workspaceColon}</strong>
                   <span className="path">
                     {ws.localRoot}&nbsp;&nbsp;⇄&nbsp;&nbsp;{ws.remoteRoot}
                   </span>
@@ -181,25 +181,25 @@ export function PeerDetailPage({ peerId }: { peerId: string }) {
                         {c.status === "synced" ? (
                           <span className="status-pill synced" style={{ width: 88 }}>
                             <span className="dot online" />
-                            已同步
+                            {t.synced}
                           </span>
                         ) : c.status === "syncing" ? (
                           <span className="status-pill syncing" style={{ width: 120 }}>
                             <span className="spinner" />
-                            同步中 {c.progress ?? 0}%
+                            {t.syncingPct(c.progress ?? 0)}
                           </span>
                         ) : c.status === "conflict" ? (
                           <span className="status-pill conflict" style={{ width: 88 }}>
-                            ⚠ 冲突
+                            {t.conflictPill}
                           </span>
                         ) : (
                           <span className="status-pill disabled" style={{ width: 88 }}>
                             <span className="dot offline" />
-                            未开启
+                            {t.notEnabled}
                           </span>
                         )}
                         <span className="faint" style={{ flex: 1 }} />
-                        {c.newlyDiscovered && <span className="faint">新发现</span>}
+                        {c.newlyDiscovered && <span className="faint">{t.newlyDiscoveredTag}</span>}
                       </div>
                     ))}
                   </div>
@@ -216,18 +216,18 @@ export function PeerDetailPage({ peerId }: { peerId: string }) {
         <div className="card" style={{ marginTop: 14 }}>
           {history.length === 0 ? (
             <p className="faint" style={{ fontSize: 12 }}>
-              暂无同步历史
+              {t.noSyncHistory}
             </p>
           ) : (
             history.slice(0, 20).map((h, i) => (
               <div className="history-row" key={i}>
                 <span>{fmtTime(h.timestamp)}</span>
                 <span>{h.childName ? `${h.workspaceName}/${h.childName}` : h.projectId}</span>
-                <span>{h.direction === "push" ? "→推送" : "←拉取"}</span>
+                <span>{h.direction === "push" ? t.histPush : t.histPull}</span>
                 {/* ISS-013: 标注手动/自动触发 */}
-                <span className="faint">{h.trigger === "auto" ? "自动" : "手动"}</span>
-                <span className={h.success ? "ok" : "fail"}>{h.success ? "成功" : "失败"}</span>
-                <span>{h.success ? `${h.files}文件 ${fmtBytes(h.bytes)}` : (h.detail ?? "")}</span>
+                <span className="faint">{h.trigger === "auto" ? t.trigAuto : t.trigManual}</span>
+                <span className={h.success ? "ok" : "fail"}>{h.success ? t.success : t.failed}</span>
+                <span>{h.success ? t.histFiles(h.files, fmtBytes(h.bytes)) : (h.detail ?? "")}</span>
               </div>
             ))
           )}
@@ -241,21 +241,21 @@ export function PeerDetailPage({ peerId }: { peerId: string }) {
           <div className="btn-group">
             <button
               disabled={!online}
-              title={online ? "" : "设备离线"}
+              title={online ? "" : t.deviceOffline}
               onClick={() => setDialog({ kind: "batch", peerId, direction: "push" })}
             >
-              全部推送
+              {t.pushAll}
             </button>
             <button
               disabled={!online}
-              title={online ? "" : "设备离线"}
+              title={online ? "" : t.deviceOffline}
               onClick={() => setDialog({ kind: "batch", peerId, direction: "pull" })}
             >
-              全部拉取
+              {t.pullAll}
             </button>
           </div>
           <button className="danger" onClick={() => setDialog({ kind: "unpair", peerId })}>
-            解除配对
+            {t.unpair}
           </button>
         </div>
       )}

@@ -95,6 +95,11 @@ export const ipc = {
   pendingTextMessage: () => call<TextMessage | null>("pending_text_message"),
   sendTextMessage: (peerName: string, content: string) =>
     call<void>("send_text_message", { peerName, content }),
+  textMessages: (peerName: string) =>
+    call<{ senderName: string; content: string; timestamp: number; peerName?: string; mine?: boolean }[]>(
+      "text_messages",
+      { peerName },
+    ),
   requestFileTransfer: (peerName: string, path: string, confirmedSensitive?: string[]) =>
     call<string>("request_file_transfer", {
       peerName,
