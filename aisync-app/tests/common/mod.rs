@@ -150,6 +150,9 @@ impl TwoBackendBuilder {
         let peer_name = "B".to_string();
         // watcher 自动同步测试需短 cooldown 才能确定性观测（首次设置即定，幂等）。
         aisync_app_lib::backend::set_auto_sync_cooldown_for_test(Duration::from_millis(200));
+        // 测试隔离：把 codex 会话目录指向一个共享的空目录，绝不扫描真实 ~/.codex
+        // （AUTO-070）。所有测试指向同一只读空目录，env 全局但内容相同、安全。
+        ensure_isolated_codex_dir();
         let sync_mode = if self.two_way {
             SyncModeConfig::TwoWayAuto
         } else {
@@ -302,6 +305,19 @@ impl TwoBackendBuilder {
         }
         harness
     }
+}
+
+/// 把 codex 会话目录指向共享空目录，避免测试扫描真实 ~/.codex（AUTO-070）。
+/// OnceLock 确保只建一次；env 全局但所有测试指向同一只读空目录，并行安全。
+fn ensure_isolated_codex_dir() {
+    use std::sync::OnceLock;
+    static CODEX_DIR: OnceLock<PathBuf> = OnceLock::new();
+    let dir = CODEX_DIR.get_or_init(|| {
+        let d = std::env::temp_dir().join("aisync-test-empty-codex");
+        let _ = fs::create_dir_all(&d);
+        d
+    });
+    std::env::set_var("AISYNC_CODEX_SESSIONS_DIR", dir);
 }
 
 /// 当前 Unix 秒。
@@ -550,6 +566,25 @@ impl TwoBackend {
     /// A 端项目映射的同步历史（最新在前）。
     pub fn a_history(&self) -> Vec<serde_json::Value> {
         self.a.sync_history(Some(&self.project_name))
+    }
+
+    /// B 端（接收端）同步历史——黑盒读 B 的 history.jsonl（最新在前）。
+    pub fn b_history(&self) -> Vec<serde_json::Value> {
+        let path = self.b_config_path.with_file_name("history.jsonl");
+        let Ok(text) = fs::read_to_string(&path) else {
+            return Vec::new();
+        };
+        let mut rows: Vec<serde_json::Value> = text
+            .lines()
+            .filter_map(|l| serde_json::from_str(l).ok())
+            .collect();
+        rows.reverse(); // 最新在前
+        rows
+    }
+
+    /// 查询已记录的结构化事件（供日志断言）。`events_for(event, Some(project))`。
+    pub fn events_for(&self, event: &str) -> Vec<aisync_app_lib::backend::RecordedEvent> {
+        aisync_app_lib::backend::events_for(event, Some(&self.project_name))
     }
 
     /// 在 A 的 Claude 会话目录写一条含 `marker` 的 JSONL 记录（用于纯对话同步测试）。

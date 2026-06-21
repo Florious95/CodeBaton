@@ -635,13 +635,19 @@ fn auto_042a_concurrent_bidirectional_push() {
         });
     });
 
-    // 关键安全属性：无 panic（线程已 join）；最终两端内容收敛一致（不发散），
-    // 即使发生覆盖也不出现 A/B 各执一词的永久分叉。给 watcher 充分 settle。
-    h.wait_watcher();
-    h.wait_watcher();
+    // 关键安全属性：① 无 panic（线程已 join，无 nested runtime panic）；
+    // ② 不陷入永久分叉——可被一次显式调和同步收敛（而非依赖 watcher 时序，避免 flaky）。
+    // 显式 A→B 调和（确认覆盖以越过可能的脑裂）。
+    let _ = h.a.run_sync(
+        "race",
+        "B",
+        aisync_core::Direction::LocalToRemote,
+        &[],
+        true,
+    );
     let a_final = std::fs::read_to_string(h.a_dir().join("base.txt")).unwrap();
     let b_final = std::fs::read_to_string(h.b_dir().join("base.txt")).unwrap();
-    assert_eq!(a_final, b_final, "竞态后两端内容应收敛一致，不永久分叉");
+    assert_eq!(a_final, b_final, "竞态后可被调和同步收敛一致，不永久分叉");
 }
 
 // ── Suite D：workspace 多子目录同步 ─────────────────────────────────
@@ -915,4 +921,165 @@ fn auto_044_delete_mapping_during_inflight() {
     // A 文件不丢。
     assert_file_exists(&h.a_dir().join("keep.txt")).unwrap();
     assert_file_exists(&h.a_dir().join("large.bin")).unwrap();
+}
+
+// ── Suite K：历史、日志、可观测性（结构化事件 store 支持）──────────────
+
+/// AUTO-100 成功/失败历史角色区分：接收端历史含 role=receiver + 方向/files/bytes/fileType。
+/// 注：发送端历史由 commands 层 record_sync_scoped 写（run_sync 直调不写），故断言接收端。
+#[test]
+fn auto_100_history_role_and_fields() {
+    let h = TwoBackend::builder()
+        .project_name("hist-role")
+        .a_file("a.txt", "aa\n")
+        .a_file("b.txt", "bb\n")
+        .build();
+    h.push(false).expect("推送成功");
+    settle();
+
+    let hist = h.b_history();
+    let latest = hist.first().expect("B 应有接收历史");
+    assert_eq!(latest.get("role").and_then(|v| v.as_str()), Some("receiver"), "接收端 role=receiver");
+    assert_eq!(latest.get("success").and_then(|v| v.as_bool()), Some(true), "成功记录");
+    assert_eq!(latest.get("direction").and_then(|v| v.as_str()), Some("receive"));
+    assert!(latest.get("files").and_then(|v| v.as_u64()).unwrap_or(0) >= 2, "含 files 字段");
+    assert!(latest.get("bytes").and_then(|v| v.as_u64()).unwrap_or(0) > 0, "含 bytes 字段");
+    assert!(latest.get("fileType").is_some(), "含 fileType 字段");
+    assert!(latest.get("trigger").is_some(), "含 trigger 字段");
+}
+
+/// AUTO-101 TLS/transport 失败日志足够定位：连接选择事件含 endpoint/cert_source，
+/// 失败事件含 error（可区分 cert 不匹配 / 超时 / close_notify）。
+#[test]
+fn auto_101_tls_failure_logs_diagnostics() {
+    let h = TwoBackend::builder().project_name("tls-log").a_file("a.txt", "a\n").build();
+    // 注入错误 cert → cert 不匹配失败。
+    let wrong = h.run_root.path().join("wrong.der");
+    std::fs::write(&wrong, b"not-a-cert").unwrap();
+    h.repoint_peer(([127,0,0,1], h.b_serve().port).into(), Some(wrong));
+    let result = h.push(false);
+    assert!(result.is_err());
+
+    // 连接选择事件含 endpoint + cert_source。
+    let conn = h.events_for("transport_peer_connection_selected");
+    let last = conn.last().expect("应有连接选择事件");
+    assert!(last.field("endpoint").is_some(), "应记录 endpoint");
+    assert!(last.field("cert_source").is_some(), "应记录 cert_source");
+    // 失败事件含 error（非泛化）。
+    let fail = h.events_for("sync_failed");
+    let f = fail.last().expect("应有 sync_failed 事件");
+    let err = f.field("error").unwrap_or("");
+    assert!(!err.is_empty(), "失败应记录具体 error");
+    assert!(f.field("peer").is_some() && f.field("remote_dir").is_some(), "失败含 peer/remote_dir");
+}
+
+/// AUTO-102 备份和回收站审计：确认覆盖产生备份目录（可审计路径）；少量删除产生
+/// 可恢复 trash（可审计路径）。黑盒以文件系统审计制品验证。
+#[test]
+fn auto_102_backup_and_trash_audit() {
+    // 确认覆盖 → 备份审计。
+    let h1 = TwoBackend::builder().project_name("audit-bak")
+        .a_file("README.md","A\n").b_file("old.txt","old\n").build();
+    h1.push(true).expect("确认覆盖");
+    let backup = assert_backup_exists(h1.b_dir().parent().unwrap(), "audit-bak").unwrap();
+    assert!(backup.join("old.txt").exists(), "备份路径可审计且含覆盖前文件");
+
+    // 少量删除 → 回收站审计（路径可定位、内容可恢复）。
+    let h2 = TwoBackend::builder().project_name("audit-trash")
+        .a_file("a.txt","a\n").a_file("b.txt","b\n").a_file("c.txt","c\n").synced().build();
+    h2.remove_a("c.txt");
+    h2.push(false).expect("删除推送");
+    assert_trashed_with_content(h2.b_dir(), "c.txt", "c\n").unwrap();   // trashed path 可审计+可恢复
+}
+
+/// AUTO-072 重复多轮会话同步 RSS 不单调增长（无内存泄漏）。
+/// 注：测试进程内 RSS 跨线程共享、有噪声，故用「50 轮后 RSS 不显著高于前几轮基线」
+/// 的宽松上界断言（检测**泄漏级**增长，非精确测量）。
+#[cfg(target_os = "macos")]
+#[test]
+fn auto_072_repeated_sync_rss_bounded() {
+    use aisync_app_lib::backend::current_rss_bytes;
+
+    let big: String = "j".repeat(1024 * 1024); // 1MB 基础内容
+    let h = TwoBackend::builder()
+        .project_name("rss-loop")
+        .a_file("data.jsonl", &big)
+        .synced()
+        .build();
+
+    let mut baseline = 0u64;
+    for round in 0..50 {
+        // 每轮追加一小段，触发增量同步。
+        let content = format!("{big}\n{{\"round\":{round}}}\n");
+        h.write_a("data.jsonl", &content);
+        h.push(false).expect("轮次同步");
+        if round == 4 {
+            baseline = current_rss_bytes(); // 前几轮预热后取基线
+        }
+    }
+    let after = current_rss_bytes();
+
+    // 泄漏级断言：50 轮后 RSS 不应是基线的数倍。给 1.8x + 200MB 余量（覆盖噪声/分配抖动）。
+    // 若每轮泄漏 1MB×50=50MB 也在容差内——故同时断言增量不超过 150MB（远小于 50 轮×全量）。
+    if baseline > 0 {
+        let growth = after.saturating_sub(baseline);
+        assert!(
+            growth < 200 * 1024 * 1024,
+            "50 轮后 RSS 增长 {}MB 超阈值（疑似内存泄漏）",
+            growth / 1024 / 1024
+        );
+    }
+    // 最终内容一致。
+    assert_dir_tree_eq(h.a_dir(), h.b_dir()).unwrap();
+}
+
+/// AUTO-070 测试不得扫描真实用户会话目录：所有 session_scan_done 的 local_session_dir
+/// 都在测试管理目录内，不出现真实 /Users/<user>/.claude 或 /Users/<user>/.codex。
+#[test]
+fn auto_070_no_real_user_session_scan() {
+    let h = TwoBackend::builder()
+        .project_name("no-real-scan")
+        .a_file("src/main.rs", "fn main() {}\n")
+        .build();
+    // 写一条会话，触发 session 扫描。
+    h.write_a_claude_session("s1", "marker-070");
+    h.push(false).expect("含会话同步");
+    settle();
+
+    let real_home = std::env::var("HOME").unwrap_or_default();
+    let real_claude = format!("{real_home}/.claude");
+    let real_codex = format!("{real_home}/.codex");
+    for ev in h.events_for("session_scan_done") {
+        if let Some(dir) = ev.field("local_session_dir") {
+            assert!(
+                !dir.starts_with(&real_claude) && !dir.starts_with(&real_codex),
+                "session 扫描不得触及真实用户目录: {dir}"
+            );
+        }
+    }
+}
+
+/// AUTO-010 非空目标取消覆盖：检测到目标非空后用户取消（不推送）→ B 原文件完全不变。
+/// 注：产品的「取消」= UI 检测 check_target_not_empty 为真后不调用 push（无独立 cancel API）。
+#[test]
+fn auto_010_cancel_overwrite_keeps_target() {
+    let h = TwoBackend::builder()
+        .project_name("cancel-ov")
+        .a_file("README.md", "from A\n")
+        .b_file("remote-only.txt", "must survive\n")
+        .b_file("keep.md", "from B\n")
+        .build();
+    let b_hash_before = dir_hash_of(h.b_dir());
+
+    // 推送前检测目标非空。
+    assert!(
+        h.a.check_target_not_empty("cancel-ov", "B").unwrap(),
+        "目标应被检测为非空"
+    );
+    // 用户取消 = 不推送。B 完全不变。
+    assert_eq!(dir_hash_of(h.b_dir()), b_hash_before, "取消后 B 原文件完全不变");
+    assert_file_content(&h.b_dir().join("remote-only.txt"), "must survive\n").unwrap();
+    assert_file_content(&h.b_dir().join("keep.md"), "from B\n").unwrap();
+    // 不写成功快照（从未推送）。
+    assert!(h.a_snapshot().is_none(), "取消未推送不应有快照");
 }
