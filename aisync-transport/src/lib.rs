@@ -2050,7 +2050,20 @@ impl TransportServer {
                 );
                 // commit 在发 SyncComplete 之前：必须先落盘成功（含 50% 安全阀判定）才能
                 // 告诉客户端成功；否则安全阀中止/磁盘错误时客户端会误存快照。
-                commit_staging_with_options(&staging, &target_dir, confirm_overwrite)?;
+                // 关键：commit 失败（如安全阀中止）须把错误**发回客户端**再断，否则客户端
+                // 只看到 close_notify EOF 而非真实原因（"safety valve"）。
+                if let Err(error) = commit_staging_with_options(&staging, &target_dir, confirm_overwrite) {
+                    let _ = fs::remove_dir_all(&staging);
+                    let _ = write_message(
+                        &mut stream,
+                        &Message::Error {
+                            message: error.to_string(),
+                        },
+                    )
+                    .await;
+                    let _ = tokio::time::timeout(FRAME_HEADER_TIMEOUT, stream.shutdown()).await;
+                    return Err(error);
+                }
                 let committed = scan_manifest(&target_dir)?;
                 trace_stage(
                     "commit_done",
@@ -2503,14 +2516,12 @@ pub fn pack_small_files(root: &Path, files: &[FileEntry]) -> Result<Vec<u8>> {
             }
 
             let mut header = tar::Header::new_gnu();
-            header
-                .set_path(&entry.relative_path)
-                .map_err(|error| transport_err(error.to_string()))?;
             header.set_size(data.len() as u64);
             header.set_mode(0o644);
-            header.set_cksum();
+            // append_data 自动处理超长路径（GNU @LongLink 扩展）；set_path 在 >100 字节
+            // 时会因 ustar 头部限制失败（AUTO-083 深嵌套）。
             builder
-                .append(&header, Cursor::new(data))
+                .append_data(&mut header, &entry.relative_path, Cursor::new(data))
                 .map_err(|error| transport_err(error.to_string()))?;
         }
         builder
@@ -2538,6 +2549,8 @@ pub fn unpack_small_files(staging_dir: &Path, tar_stream: &[u8]) -> Result<u64> 
             .map_err(|error| transport_err(error.to_string()))?;
         let path_str = normalize_relative_path(&path)?;
         let destination = staging_dir.join(checked_relative_path(&path_str)?);
+        // staging 副本里清掉文件↔目录类型冲突，否则 create_dir_all/File::create 失败。
+        clear_path_type_conflict(&destination)?;
         if let Some(parent) = destination.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -3358,9 +3371,12 @@ fn commit_staging_with_options(
     fs::create_dir_all(target_dir)?;
 
     // 1. 覆盖/新增：staging 中每个文件原子写入 target。
+    //    先消解类型冲突（target 端同名路径是目录、或祖先是文件），冲突节点移入回收站
+    //    可恢复——否则 fs::write 会因 File exists / Is a directory 失败导致整次同步中断。
     for relative in &staging_files {
         let source = staging.join(relative);
         let destination = target_dir.join(relative);
+        resolve_type_conflict(target_dir, relative, &destination)?;
         let data = fs::read(&source)?;
         write_file_atomic(&destination, &data)?;
     }
@@ -3368,6 +3384,12 @@ fn commit_staging_with_options(
     // 2. 删除：staging 中已不存在的 target 文件移入回收站，而非物理删除。
     for relative in to_delete {
         let victim = target_dir.join(relative);
+        // 类型翻转：原本是文件的 victim，可能因第 1 步写入了 `victim/child` 而变成目录
+        // （file→dir）。此时该路径是合法的新目录，不应删——resolve_type_conflict 已把
+        // 旧文件移入回收站。仅当 victim 仍是文件时才走删除→回收站。
+        if victim.is_dir() {
+            continue;
+        }
         trash_file(target_dir, relative, &victim)?;
         remove_empty_parents(target_dir, victim.parent());
     }
@@ -3397,12 +3419,70 @@ fn backup_target_dir(target_dir: &Path) -> Result<()> {
         .unwrap_or("target");
     let parent = target_dir.parent().unwrap_or_else(|| Path::new("."));
     let backup = parent.join(format!("{name}.bak-{stamp}"));
-    fs::create_dir_all(&backup)?;
-    copy_dir_contents(target_dir, &backup)?;
+    // 备份失败必须**阻止后续覆盖**（P0 数据丢失路径）：错误明确为 backup create/write
+    // failed，由 commit_staging_with_options 的 `?` 在写 target 之前中止，B 原状不动。
+    fs::create_dir_all(&backup)
+        .map_err(|e| transport_err(format!("backup create failed for {}: {e}", backup.display())))?;
+    copy_dir_contents(target_dir, &backup)
+        .map_err(|e| transport_err(format!("backup write failed for {}: {e}", backup.display())))?;
     trace_stage(
         "target_backup_created",
         format!("target={} backup={}", target_dir.display(), backup.display()),
     );
+    Ok(())
+}
+
+/// 消解 target 端类型冲突，使 `destination` 能作为普通文件写入：
+/// 1. `destination` 本身是目录（A 把目录换成文件）→ 整个目录移入回收站。
+/// 2. `destination` 的某个祖先是文件（A 把文件换成目录）→ 该文件移入回收站。
+/// 冲突节点都进回收站，内容可恢复；无冲突则 no-op。
+fn resolve_type_conflict(target_dir: &Path, relative: &Path, destination: &Path) -> Result<()> {
+    // case 1：目标位置是目录，但要写文件。
+    if destination.is_dir() {
+        trash_dir(target_dir, relative, destination)?;
+        return Ok(());
+    }
+    // case 2：某祖先是文件，挡住了要创建的目录。逐级向上找。
+    let mut ancestor = destination.parent();
+    let mut ancestor_rel = relative.parent();
+    while let (Some(path), Some(rel)) = (ancestor, ancestor_rel) {
+        if path == target_dir || rel.as_os_str().is_empty() {
+            break;
+        }
+        if path.is_file() {
+            trash_file(target_dir, rel, path)?;
+            break;
+        }
+        ancestor = path.parent();
+        ancestor_rel = rel.parent();
+    }
+    Ok(())
+}
+
+/// 把一个目录整体移入回收站（类型翻转时旧目录可恢复）。
+fn trash_dir(target_dir: &Path, relative: &Path, victim: &Path) -> Result<()> {
+    if !victim.exists() {
+        return Ok(());
+    }
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_else(|_| Duration::from_secs(0))
+        .as_secs();
+    let grave = target_dir
+        .join(".aisync-trash")
+        .join(stamp.to_string())
+        .join(relative);
+    if let Some(parent) = grave.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    match fs::rename(victim, &grave) {
+        Ok(()) => {}
+        Err(_) => {
+            copy_dir_contents(victim, &grave)?;
+            fs::remove_dir_all(victim)?;
+        }
+    }
+    purge_expired_trash(target_dir);
     Ok(())
 }
 
@@ -3467,16 +3547,40 @@ fn copy_dir_contents(source: &Path, destination: &Path) -> Result<()> {
         if entry.file_type().is_dir() {
             fs::create_dir_all(&target)?;
         } else if entry.file_type().is_file() {
+            clear_path_type_conflict(&target)?;
             if let Some(parent) = target.parent() {
                 fs::create_dir_all(parent)?;
             }
-            fs::copy(path, target)?;
+            fs::copy(path, &target)?;
         }
     }
     Ok(())
 }
 
+/// 清掉 `path` 写入前的文件↔目录类型冲突（删除挡路的旧类型节点）。
+/// 用于 staging 副本写入：副本里的旧类型节点可丢弃，目标真实数据由 commit 的
+/// resolve_type_conflict 移入回收站。否则 create_dir_all/File::create/rename 会失败。
+fn clear_path_type_conflict(path: &Path) -> Result<()> {
+    // 1. 祖先是文件但需要目录 → 删该文件。
+    if let Some(parent) = path.parent() {
+        let mut ancestor = Some(parent);
+        while let Some(a) = ancestor {
+            if a.is_file() {
+                fs::remove_file(a)?;
+                break;
+            }
+            ancestor = a.parent();
+        }
+    }
+    // 2. 目标位置是目录但要写文件 → 删该目录。
+    if path.is_dir() {
+        fs::remove_dir_all(path)?;
+    }
+    Ok(())
+}
+
 fn write_file_atomic(path: &Path, data: &[u8]) -> Result<()> {
+    clear_path_type_conflict(path)?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }

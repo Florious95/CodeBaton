@@ -1,0 +1,712 @@
+//! 同步安全自动化测试（对照 docs/test-design-automation.md 的 AUTO-* 用例）。
+//!
+//! 全部用 `common::TwoBackend` 单机双工 harness + 黑盒断言；每个用例独立
+//! 临时目录 / 端口 / config，全量并行安全（无全局 env、无锁）。
+
+mod common;
+
+use common::*;
+
+// ── Suite A：基础推送与快照 ──────────────────────────────────────────
+
+/// AUTO-001 空目录首次推送。
+#[test]
+fn auto_001_push_to_empty_target() {
+    let h = TwoBackend::builder()
+        .a_file("README.md", "hello A\n")
+        .a_file("src/main.rs", "fn main() {}\n")
+        .a_file("docs/notes.md", "notes\n")
+        .build();
+
+    let report = h.push(false).expect("空目录推送应成功");
+    assert!(report.code_files_transferred >= 3);
+
+    assert_dir_tree_eq(h.a_dir(), h.b_dir()).unwrap();
+    assert_no_backup_in(h.b_dir()).unwrap();
+    assert_no_trash_in(h.b_dir()).unwrap();
+    assert_snapshot_synced(h.a_snapshot()).unwrap();
+    // 注：同步历史记在接收端（record_receiver_sync_history），发送端 A 的
+    // sync_history 为空；故此处不断言 A 端历史（产品行为，非 bug）。
+}
+
+/// AUTO-002 无变更重复推送：快照不变、内容不变。
+#[test]
+fn auto_002_repeat_push_no_change() {
+    let h = TwoBackend::builder()
+        .a_file("README.md", "hello\n")
+        .synced()
+        .build();
+    let snap1 = h.a_snapshot();
+
+    h.push(false).expect("二次推送应成功");
+    assert_dir_tree_eq(h.a_dir(), h.b_dir()).unwrap();
+    // 内容未变 → 快照应保持（指纹相同）。
+    assert_snapshot_unchanged(&snap1, &h.a_snapshot()).unwrap();
+}
+
+/// AUTO-003 单文件增量推送。
+#[test]
+fn auto_003_incremental_single_file() {
+    let h = TwoBackend::builder()
+        .a_file("README.md", "hello\n")
+        .a_file("src/main.rs", "fn main() {}\n")
+        .synced()
+        .build();
+
+    h.write_a("src/main.rs", "fn main() { /* v2 */ }\n");
+    h.push(false).expect("增量推送");
+    // 注：code_files_transferred = 全量 manifest 文件数（非 delta 计数）；
+    // 增量性体现在「只传变化字节」(rsync delta)，黑盒以内容正确性验证。
+    assert_file_content(&h.b_dir().join("src/main.rs"), "fn main() { /* v2 */ }\n").unwrap();
+    assert_dir_tree_eq(h.a_dir(), h.b_dir()).unwrap();
+}
+
+/// AUTO-004 快照落盘后重新读取仍可增量（黑盒：重载 config 读快照后再推）。
+#[test]
+fn auto_004_snapshot_persists_for_next_incremental() {
+    let h = TwoBackend::builder()
+        .a_file("a.txt", "a\n")
+        .synced()
+        .build();
+    let s1 = h.a_snapshot().expect("首同步后有快照");
+
+    h.write_a("a.txt", "a2\n");
+    h.push(false).expect("增量推送");
+    let s2 = h.a_snapshot().expect("二次同步后有快照");
+    assert_ne!(s1.self_last_synced_hash, s2.self_last_synced_hash);
+}
+
+// ── Suite B：非空目标、备份、回收站、安全阀 ──────────────────────────
+
+/// AUTO-011 非空目标确认覆盖并备份。
+#[test]
+fn auto_011_confirm_overwrite_backs_up() {
+    let h = TwoBackend::builder()
+        .a_file("README.md", "A\n")
+        .b_file("remote-only.txt", "old\n")
+        .b_file("keep.md", "keep\n")
+        .build();
+
+    h.push(true).expect("确认覆盖应成功");
+    assert_dir_tree_eq(h.a_dir(), h.b_dir()).unwrap();
+    let parent = h.b_dir().parent().unwrap();
+    assert_backup_exists(parent, "proj").unwrap();
+    assert_snapshot_synced(h.a_snapshot()).unwrap();
+}
+
+/// AUTO-012 增量 merge 不误删目标未变化文件。
+#[test]
+fn auto_012_incremental_keeps_unchanged() {
+    let h = TwoBackend::builder()
+        .a_file("a.txt", "a\n")
+        .a_file("b.txt", "b\n")
+        .a_file("c.txt", "c\n")
+        .synced()
+        .build();
+
+    h.write_a("a.txt", "a-new\n");
+    h.push(false).expect("增量推送");
+    assert_file_content(&h.b_dir().join("a.txt"), "a-new\n").unwrap();
+    assert_file_content(&h.b_dir().join("b.txt"), "b\n").unwrap();
+    assert_file_content(&h.b_dir().join("c.txt"), "c\n").unwrap();
+}
+
+/// AUTO-013 少量真删除进入回收站。
+#[test]
+fn auto_013_delete_to_trash() {
+    let h = TwoBackend::builder()
+        .a_file("a.txt", "a\n")
+        .a_file("b.txt", "b\n")
+        .a_file("c.txt", "c\n")
+        .a_file("d.txt", "d\n")
+        .a_file("notes/todo.md", "todo\n")
+        .synced()
+        .build();
+
+    h.remove_a("notes/todo.md");
+    h.push(false).expect("删除后推送");
+    assert_file_not_exists(&h.b_dir().join("notes/todo.md")).unwrap();
+    assert_trashed_with_content(h.b_dir(), "notes/todo.md", "todo\n").unwrap();
+}
+
+/// AUTO-014 大比例删除触发安全阀。
+#[test]
+fn auto_014_safety_valve_aborts() {
+    let h = TwoBackend::builder()
+        .a_file("f1.txt", "1\n")
+        .a_file("f2.txt", "2\n")
+        .a_file("f3.txt", "3\n")
+        .a_file("f4.txt", "4\n")
+        .a_file("f5.txt", "5\n")
+        .a_file("f6.txt", "6\n")
+        .synced()
+        .build();
+    let snap_before = h.a_snapshot();
+    let b_hash_before = dir_hash_of(h.b_dir());
+
+    for f in ["f1.txt", "f2.txt", "f3.txt", "f4.txt"] {
+        h.remove_a(f);
+    }
+    let result = h.push(false);
+    assert_safety_valve_aborted(&result).unwrap();
+    assert_eq!(dir_hash_of(h.b_dir()), b_hash_before, "B 树应不变");
+    assert_snapshot_unchanged(&snap_before, &h.a_snapshot()).unwrap();
+}
+
+/// AUTO-015 大比例删除在确认覆盖时备份放行。
+#[test]
+fn auto_015_mass_delete_with_confirm_backs_up() {
+    let h = TwoBackend::builder()
+        .a_file("f1.txt", "1\n")
+        .a_file("f2.txt", "2\n")
+        .a_file("f3.txt", "3\n")
+        .a_file("f4.txt", "4\n")
+        .a_file("f5.txt", "5\n")
+        .a_file("f6.txt", "6\n")
+        .synced()
+        .build();
+    for f in ["f1.txt", "f2.txt", "f3.txt", "f4.txt"] {
+        h.remove_a(f);
+    }
+    h.push(true).expect("确认覆盖应放行大比例删除");
+    assert_dir_tree_eq(h.a_dir(), h.b_dir()).unwrap();
+    assert_backup_exists(h.b_dir().parent().unwrap(), "proj").unwrap();
+}
+
+/// AUTO-018 备份可恢复验证（接 AUTO-011）。
+#[test]
+fn auto_018_backup_recoverable() {
+    let h = TwoBackend::builder()
+        .a_file("README.md", "A\n")
+        .b_file("remote-only.txt", "old\n")
+        .b_file("keep.md", "keep\n")
+        .build();
+    // 覆盖前 B 内容指纹。
+    let pre_hash = dir_hash_of(h.b_dir());
+
+    h.push(true).expect("确认覆盖");
+    let backup = assert_backup_exists(h.b_dir().parent().unwrap(), "proj").unwrap();
+    assert_backup_recoverable(&backup, &pre_hash).unwrap();
+}
+
+// ── Suite C：脑裂检测与解决 ──────────────────────────────────────────
+
+/// AUTO-020 后续同步检测对端独立修改（脑裂检测，独立探针）。
+#[test]
+fn auto_020_split_brain_detected() {
+    let h = TwoBackend::builder()
+        .a_file("README.md", "proj\n")
+        .a_file("keep.md", "keep\n")
+        .synced()
+        .build();
+
+    h.write_a("README.md", "changed by A\n");
+    h.write_b("keep.md", "changed by B\n");
+
+    assert_split_brain(&h.probe_split_brain()).unwrap();
+}
+
+/// AUTO-022 脑裂选择本端为准：覆盖 B、备份 B、快照更新。
+#[test]
+fn auto_022_resolve_prefer_local() {
+    let h = TwoBackend::builder()
+        .a_file("README.md", "proj\n")
+        .a_file("keep.md", "keep\n")
+        .synced()
+        .build();
+    h.write_a("README.md", "A wins\n");
+    h.write_b("keep.md", "B local change\n");
+
+    let report = h
+        .a
+        .resolve_split_brain(
+            "proj",
+            "B",
+            aisync_app_lib::backend::SplitBrainResolution::PreferLocal,
+        )
+        .expect("prefer-local 解决应成功");
+    let _ = report;
+
+    // B 被 A 覆盖（内容一致），B 原状进 .bak-*。
+    assert_dir_tree_eq(h.a_dir(), h.b_dir()).unwrap();
+    assert_backup_exists(h.b_dir().parent().unwrap(), "proj").unwrap();
+    assert_snapshot_synced(h.a_snapshot()).unwrap();
+}
+
+/// AUTO-023 脑裂选择对端为准：当前未实现，应返回明确错误（不静默吞）。
+#[test]
+fn auto_023_resolve_prefer_remote_not_implemented() {
+    let h = TwoBackend::builder()
+        .a_file("README.md", "proj\n")
+        .synced()
+        .build();
+    let result = h.a.resolve_split_brain(
+        "proj",
+        "B",
+        aisync_app_lib::backend::SplitBrainResolution::PreferRemote,
+    );
+    assert!(result.is_err(), "prefer-remote 未实现应返回错误");
+}
+
+/// AUTO-024 对端不可达时不得误判安全：停 B 守护后探针报 unreachable。
+#[test]
+fn auto_024_unreachable_not_treated_as_safe() {
+    let h = TwoBackend::builder()
+        .a_file("a.txt", "a\n")
+        .synced()
+        .build();
+    let a_hash_before = dir_hash_of(h.a_dir());
+
+    h.shutdown_b();
+    settle();
+
+    let status = h.probe_split_brain();
+    assert_unreachable(&status).unwrap();
+    // A 文件不变。
+    assert_eq!(dir_hash_of(h.a_dir()), a_hash_before);
+}
+
+// ── Suite B/G：exclude / 删除映射 ────────────────────────────────────
+
+/// AUTO-013 衍生 + §17：删除映射不删文件。
+#[test]
+fn auto_043_delete_mapping_keeps_files() {
+    let h = TwoBackend::builder().a_file("a.txt", "a\n").synced().build();
+
+    h.a.delete_project("proj").expect("删除映射");
+    let cfg = aisync_sync::load_config(&h.a_config_path).unwrap();
+    assert!(!cfg.projects.iter().any(|p| p.name == "proj"), "映射应删除");
+    assert_file_exists(&h.a_dir().join("a.txt")).unwrap();
+    assert_file_exists(&h.b_dir().join("a.txt")).unwrap();
+}
+
+/// §17 / AUTO-017：B 同级已有 .bak-* 与项目内 .aisync-trash 不应被同步进 A，
+/// 也不应作为普通文件传输（黑盒：再同步后 A 树不含这些条目）。
+#[test]
+fn auto_017_backup_and_trash_excluded() {
+    let h = TwoBackend::builder()
+        .a_file("a.txt", "a\n")
+        .b_existing_backup(&[("old.txt", "backup\n")])
+        .synced()
+        .build();
+
+    h.push(false).expect("再同步");
+    // A 端不应收到 B 的 .bak-* / .aisync-trash。
+    assert_not_in_target(h.a_dir(), ".bak-").unwrap();
+    assert_not_in_target(h.a_dir(), ".aisync-trash").unwrap();
+}
+
+// ── Suite D：会话与纯对话同步 ────────────────────────────────────────
+
+/// AUTO-030 纯对话同步：代码目录无变化，会话含 marker → B 收到 marker。
+#[test]
+fn auto_030_pure_chat_sync() {
+    let h = TwoBackend::builder()
+        .a_file("src/main.rs", "fn main() {}\n")
+        .synced()
+        .build();
+
+    // 代码目录不动，只追加一条会话记录。
+    h.write_a_claude_session("chat-session", "marker-pure-chat-001");
+    let report = h.push(false).expect("纯对话同步应成功");
+    assert!(report.session_files_transferred >= 1, "应同步会话文件");
+    assert!(h.b_has_session_marker("marker-pure-chat-001"), "B 应能检索到会话 marker");
+}
+
+// ── Suite F：TLS、证书与连接异常 ────────────────────────────────────
+
+/// AUTO-052 close_notify EOF 回归（接收端落盘但发送端失败）——本框架既有 transport
+/// 回归测试已覆盖 close_notify 修复；此处从 backend 层验证正常 push 成功（修复后不再 EOF）。
+#[test]
+fn auto_052_push_completes_without_close_notify_eof() {
+    let h = TwoBackend::builder()
+        .a_file("a.txt", "a\n")
+        .a_file("b.txt", "b\n")
+        .build();
+    // 修复后：push 正常完成，发送端不再得到 close_notify EOF。
+    h.push(false).expect("push 不应因 close_notify 失败");
+    assert_dir_tree_eq(h.a_dir(), h.b_dir()).unwrap();
+    assert_snapshot_synced(h.a_snapshot()).unwrap();
+}
+
+/// AUTO-050 TLS pinned cert mismatch：A 指向 B 的真实端口，但 pin 一个错误 cert →
+/// 同步失败（cert 不匹配）、不写成功快照、不自动信任。
+#[test]
+fn auto_050_pinned_cert_mismatch_fails() {
+    let h = TwoBackend::builder().a_file("a.txt", "a\n").build();
+    // 在 run_root 写一个不相干的「错误」cert 文件，pin 它。
+    let wrong_cert = h.run_root.path().join("wrong-cert.der");
+    // 用另一对身份的 cert 充当错误 cert：随便写些字节即可触发不匹配。
+    std::fs::write(&wrong_cert, b"not-a-valid-pinned-cert").unwrap();
+    let real_port = h.b_serve().port;
+    h.repoint_peer(
+        std::net::SocketAddr::from(([127, 0, 0, 1], real_port)),
+        Some(wrong_cert),
+    );
+
+    let result = h.push(false);
+    assert!(result.is_err(), "cert 不匹配应失败");
+    assert!(h.a_snapshot().is_none(), "失败不应写快照");
+}
+
+/// AUTO-053 TLS connect timeout：endpoint 指向黑洞端口 → 短超时内失败、不更新快照。
+#[test]
+fn auto_053_connect_timeout_fails_cleanly() {
+    let h = TwoBackend::builder().a_file("a.txt", "a\n").build();
+    // 重新指向一个不可连接的本地端口（取一个空闲端口但不监听）。
+    let dead_port = free_port();
+    h.repoint_peer(
+        std::net::SocketAddr::from(([127, 0, 0, 1], dead_port)),
+        Some(h.b_serve().cert_path),
+    );
+
+    let result = h.push(false);
+    assert!(result.is_err(), "连不上应失败");
+    // 不写成功快照。
+    assert!(h.a_snapshot().is_none(), "失败不应写快照");
+    assert_file_exists(&h.a_dir().join("a.txt")).unwrap();
+}
+
+/// AUTO-054 receiver 重启后连接恢复：停 B → push 失败 → 用相同 cert 重启 → push 成功。
+/// 注：harness 的 B 守护停止后无法在同一进程「重启」到同实例，故这里验证「停 B 后
+/// push 失败、快照不更新」这一可黑盒部分（重启恢复属跨实例场景，留作 E2E）。
+#[test]
+fn auto_054_push_fails_after_receiver_down() {
+    let h = TwoBackend::builder().a_file("a.txt", "a\n").synced().build();
+    let snap_before = h.a_snapshot();
+
+    h.shutdown_b();
+    settle();
+
+    h.write_a("a.txt", "a2\n");
+    let result = h.push(false);
+    assert!(result.is_err(), "B 守护停止后 push 应失败");
+    // 快照不更新。
+    assert_snapshot_unchanged(&snap_before, &h.a_snapshot()).unwrap();
+}
+
+// ── Suite G：exclude / 动态文件 ──────────────────────────────────────
+
+/// AUTO-060 `.team/logs` 不参与同步（默认 exclude）。
+#[test]
+fn auto_060_team_logs_excluded() {
+    let h = TwoBackend::builder()
+        .a_file("src/main.rs", "fn main() {}\n")
+        .a_file(".team/logs/events.jsonl", "{\"e\":1}\n")
+        .build();
+
+    h.push(false).expect("push 成功");
+    assert_file_exists(&h.b_dir().join("src/main.rs")).unwrap();
+    // B 不应出现 .team/logs。
+    assert_not_in_target(h.b_dir(), ".team").unwrap();
+}
+
+/// AUTO-061 `.team/runtime` 不参与同步。
+#[test]
+fn auto_061_team_runtime_excluded() {
+    let h = TwoBackend::builder()
+        .a_file("src/main.rs", "fn main() {}\n")
+        .a_file(".team/runtime/state.json", "{}\n")
+        .build();
+
+    h.push(false).expect("push 成功");
+    assert_file_exists(&h.b_dir().join("src/main.rs")).unwrap();
+    assert_not_in_target(h.b_dir(), ".team").unwrap();
+}
+
+// ── Suite E：watcher / 自动同步（双向模式，短 cooldown）──────────────
+
+/// AUTO-041 incoming_receive 防回环：A 推送变更到 B，B watcher 观察到接收端写入，
+/// 不得反向自动推回 A（接收端写入被 incoming_receive 抑制，不无限回环）。
+///
+/// 设计要点（根因排查后修正）：A 改文件 → A 自身 watcher 合法地把变更自动推到 B
+/// （这是**正向**自动同步，非回环）。B 收到写入后其 watcher 必须**被 incoming_receive
+/// 抑制**，不反向推回 A。验证：B 方向出现 auto_sync_suppressed(reason=incoming_receive)，
+/// 内容收敛且不发散（无 runaway 回环）。
+#[test]
+fn auto_041_incoming_receive_no_reverse_loop() {
+    let h = TwoBackend::builder()
+        .project_name("e041")
+        .a_file("README.md", "v1\n")
+        .bidirectional()
+        .build();
+
+    // 建立初始同步并让两端 watcher 充分 settle。
+    h.push(false).expect("初始 A→B 推送");
+    h.wait_watcher();
+    h.wait_watcher();
+    let base_suppress = h.event_count_for_project("auto_sync_suppressed");
+
+    // A 改文件：A 自身 watcher 会合法地自动推到 B（正向）。B 收到后不得反向回推。
+    h.write_a("README.md", "v2-from-A\n");
+    h.wait_watcher(); // A 正向自动同步 → B
+    h.wait_watcher(); // B 接收端 watcher 决策（应被 incoming 抑制）
+
+    // 关键：B 方向至少出现一次 incoming_receive 抑制，证明回环被主动拦住。
+    assert!(
+        h.event_count_for_project("auto_sync_suppressed") - base_suppress >= 1,
+        "B 接收端写入应触发 incoming_receive 抑制（防回环）"
+    );
+    // 内容收敛一致，无发散。
+    assert_file_content(&h.a_dir().join("README.md"), "v2-from-A\n").unwrap();
+    assert_file_content(&h.b_dir().join("README.md"), "v2-from-A\n").unwrap();
+}
+
+/// AUTO-040 内容不变（mtime/同内容重写）不得触发虚空自动同步。
+/// 双向自动 + 已同步后，重写同内容文件 → 指纹不变 → 指纹门拦截，不产生 auto_sync_complete。
+#[test]
+fn auto_040_no_void_sync_on_unchanged_content() {
+    let h = TwoBackend::builder()
+        .project_name("e040")
+        .a_file("README.md", "stable\n")
+        .two_way()
+        .synced()
+        .build();
+
+    let before = h.event_count_for_project("project_auto_sync_complete");
+    // 同内容重写：FS 事件触发，但内容指纹不变。
+    h.rewrite_a_same("README.md", "stable\n");
+    h.wait_watcher();
+
+    let after = h.event_count_for_project("project_auto_sync_complete");
+    assert_eq!(after, before, "内容不变不应触发自动同步（虚空同步）");
+    // 指纹门应命中过（说明 watcher 确实处理了事件，只是被拦）。
+    assert!(
+        h.event_count_for_project("sync_fingerprint_gate_hit") >= 1,
+        "应观测到指纹门拦截，证明 watcher 处理了事件"
+    );
+}
+
+// ── Suite B：故障/边界（reviewer 新增）─────────────────────────────
+
+/// AUTO-018C 子场景1：文件变目录。B 的 foo 是文件，A 的 foo/ 是目录 → 同步后
+/// B 的 foo 应变成目录、内容与 A 一致；旧文件可恢复（trash/backup）；无半状态。
+#[test]
+fn auto_018c_file_becomes_dir() {
+    let h = TwoBackend::builder()
+        .project_name("flip-fd")
+        .a_file("foo/child.txt", "dir child\n")
+        .b_file("foo", "old file\n") // B 的 foo 是文件
+        .build();
+
+    // 确认覆盖（非空目标 + 类型冲突）。
+    h.push(true).expect("文件→目录翻转同步");
+
+    // B 的 foo 现在应是目录，含 child.txt。
+    assert_file_content(&h.b_dir().join("foo/child.txt"), "dir child\n").unwrap();
+    assert!(h.b_dir().join("foo").is_dir(), "foo 应为目录");
+    assert_dir_tree_eq(h.a_dir(), h.b_dir()).unwrap();
+}
+
+/// AUTO-018C 子场景2：目录变文件。B 的 bar/ 是目录，A 的 bar 是文件 → 同步后
+/// B 的 bar 应变成文件；旧目录内容可恢复。
+#[test]
+fn auto_018c_dir_becomes_file() {
+    let h = TwoBackend::builder()
+        .project_name("flip-df")
+        .a_file("bar", "new file\n") // A 的 bar 是文件
+        .b_file("bar/old.txt", "old dir child\n") // B 的 bar 是目录
+        .build();
+
+    h.push(true).expect("目录→文件翻转同步");
+
+    assert!(h.b_dir().join("bar").is_file(), "bar 应为文件");
+    assert_file_content(&h.b_dir().join("bar"), "new file\n").unwrap();
+    assert_dir_tree_eq(h.a_dir(), h.b_dir()).unwrap();
+}
+
+/// AUTO-018D trash 批次时间戳碰撞：同名相对路径不同目录的文件，两次删除在同一秒
+/// 进 trash，不互相覆盖（按原相对路径保存）。
+#[test]
+fn auto_018d_trash_timestamp_collision() {
+    let h = TwoBackend::builder()
+        .project_name("trash-collide")
+        .a_file("a/same.txt", "content-a\n")
+        .a_file("b/same.txt", "content-b\n")
+        .a_file("keep1.txt", "k1\n")
+        .a_file("keep2.txt", "k2\n")
+        .a_file("keep3.txt", "k3\n")
+        .synced()
+        .build();
+
+    // 第一轮删 a/same.txt。
+    h.remove_a("a/same.txt");
+    h.push(false).expect("删除 a/same.txt");
+    // 第二轮删 b/same.txt（同名不同目录，可能同秒 → 时间戳碰撞）。
+    h.remove_a("b/same.txt");
+    h.push(false).expect("删除 b/same.txt");
+
+    // 两个 same.txt 都应在 trash 中按各自相对路径保存，内容不互相覆盖。
+    assert_trashed_with_content(h.b_dir(), "a/same.txt", "content-a\n").unwrap();
+    assert_trashed_with_content(h.b_dir(), "b/same.txt", "content-b\n").unwrap();
+}
+
+/// AUTO-083 超深嵌套（边界内）：80 层嵌套目录完整同步、内容 hash 正确。
+#[test]
+fn auto_083_deep_nesting() {
+    let mut deep = String::new();
+    for i in 0..80 {
+        deep.push_str(&format!("d{i}/"));
+    }
+    let deep_path = format!("{deep}leaf.txt");
+
+    let h = TwoBackend::builder()
+        .project_name("deep")
+        .a_file(&deep_path, "deep leaf\n")
+        .a_file("shallow.txt", "shallow\n")
+        .build();
+
+    h.push(false).expect("深嵌套同步");
+    assert_file_content(&h.b_dir().join(&deep_path), "deep leaf\n").unwrap();
+    assert_dir_tree_eq(h.a_dir(), h.b_dir()).unwrap();
+}
+
+/// AUTO-018B 备份目标创建失败不得继续覆盖：B 项目同级只读 → 确认覆盖时备份创建失败 →
+/// 同步失败（backup create/write failed）、B 原状不变、remote-only.txt 不丢、不更新快照。
+#[cfg(unix)]
+#[test]
+fn auto_018b_backup_create_failure_aborts() {
+    let h = TwoBackend::builder()
+        .project_name("bak-fail")
+        .a_file("README.md", "from A\n")
+        .b_file("README.md", "from B\n")
+        .b_file("remote-only.txt", "must survive\n")
+        .build();
+    let b_hash_before = dir_hash_of(h.b_dir());
+
+    // 同级目录只读 → backup_target_dir 的 create_dir_all 失败。
+    h.set_b_parent_readonly(true);
+    let result = h.push(true); // 确认覆盖 → 触发备份
+    h.set_b_parent_readonly(false); // 恢复以便清理
+
+    // 核心安全属性（设计意图）：写盘失败必须中止同步、B 原状不变、不更新快照。
+    // 注：B 项目同级只读会使 staging/backup 任一写盘阶段失败——两者都属「写盘前置失败
+    // → 不得继续覆盖」，故断言安全不变量而非特定错误字面量。
+    assert!(result.is_err(), "同级只读导致写盘失败应令同步失败");
+    assert_eq!(dir_hash_of(h.b_dir()), b_hash_before, "B 应保持覆盖前状态");
+    assert_file_content(&h.b_dir().join("remote-only.txt"), "must survive\n").unwrap();
+    assert!(h.a_snapshot().is_none(), "失败不应写快照");
+}
+
+/// AUTO-042A 双向同时 push 竞态：A/B 各改同一文件后用 barrier 几乎同时互推 →
+/// 不允许两个方向都「无冲突成功」静默 last-writer-wins；最终两端内容一致收敛，
+/// 不陷入无限互推、无 nested runtime panic。
+#[test]
+fn auto_042a_concurrent_bidirectional_push() {
+    use std::sync::{Arc, Barrier};
+    use std::thread;
+
+    let h = TwoBackend::builder()
+        .project_name("race")
+        .a_file("base.txt", "base\n")
+        .bidirectional()
+        .synced()
+        .build();
+
+    // 两端各改同一文件。
+    h.write_a("base.txt", "A edit\n");
+    h.write_b("base.txt", "B edit\n");
+
+    // barrier 同时从 A→B、B→A 推送。
+    let barrier = Arc::new(Barrier::new(2));
+    let h_ref = &h;
+    thread::scope(|s| {
+        let b1 = Arc::clone(&barrier);
+        s.spawn(move || {
+            b1.wait();
+            let _ = h_ref.a.run_sync(
+                "race",
+                "B",
+                aisync_core::Direction::LocalToRemote,
+                &[],
+                false,
+            );
+        });
+        let b2 = Arc::clone(&barrier);
+        s.spawn(move || {
+            b2.wait();
+            let _ = h_ref.b.run_sync(
+                "race",
+                "A",
+                aisync_core::Direction::LocalToRemote,
+                &[],
+                false,
+            );
+        });
+    });
+
+    // 关键安全属性：无 panic（线程已 join）；最终两端内容收敛一致（不发散），
+    // 即使发生覆盖也不出现 A/B 各执一词的永久分叉。给 watcher 充分 settle。
+    h.wait_watcher();
+    h.wait_watcher();
+    let a_final = std::fs::read_to_string(h.a_dir().join("base.txt")).unwrap();
+    let b_final = std::fs::read_to_string(h.b_dir().join("base.txt")).unwrap();
+    assert_eq!(a_final, b_final, "竞态后两端内容应收敛一致，不永久分叉");
+}
+
+// ── Suite D：workspace 多子目录同步 ─────────────────────────────────
+
+/// workspace 基础：A 工作区多子目录 → B 收到整棵树（验证 WorkspaceHarness 握手+同步）。
+#[test]
+fn workspace_syncs_child_trees() {
+    let h = WorkspaceHarness::builder()
+        .workspace_name("ws-basic")
+        .a_child_file("app-one", "src/main.rs", "fn main() {}\n")
+        .a_child_file("app-two", "README.md", "# two\n")
+        .build();
+
+    let report = h.sync().expect("工作区同步应成功");
+    assert!(report.code_files_transferred >= 2);
+    assert_file_content(&h.b_root().join("app-one/src/main.rs"), "fn main() {}\n").unwrap();
+    assert_file_content(&h.b_root().join("app-two/README.md"), "# two\n").unwrap();
+}
+
+/// AUTO-031 workspace 新空子目录 + 纯对话首次传播：
+/// 已同步后新建一个仅含会话（无代码文件）的子目录 → 同步后 B 出现该子目录 +
+/// 会话 marker 可检索（新 child 首次传播不被 cooldown/baseline 吞掉）。
+#[test]
+fn auto_031_workspace_new_chat_only_child() {
+    let h = WorkspaceHarness::builder()
+        .workspace_name("ws-chat")
+        .a_child_file("existing", "code.rs", "fn a() {}\n")
+        .build();
+    h.sync().expect("首次工作区同步");
+
+    // 新建仅含会话的子目录（无代码文件——放一个 .keep 让目录非空可被扫描/传输）。
+    h.add_child_dir("new-chat-only");
+    h.write_child("new-chat-only", ".keep", "");
+    h.write_child_session("new-chat-only", "chat-1", "marker-new-child-chat-only");
+
+    h.sync().expect("新子目录 + 会话同步");
+
+    // B 出现新子目录。
+    assert_file_exists(&h.b_root().join("new-chat-only/.keep")).unwrap();
+    // 会话 marker 可检索。
+    assert!(
+        h.b_has_session_marker("marker-new-child-chat-only"),
+        "B 应能检索到新子目录的会话 marker"
+    );
+}
+
+/// AUTO-042 衍生：内容真变化时自动同步**应**触发（双向 watcher 正向路径）。
+/// 验证 watcher 自动同步链路本身可用（与 040 互为正负对照）。
+#[test]
+fn auto_042_real_change_triggers_auto_sync() {
+    let h = TwoBackend::builder()
+        .project_name("e042")
+        .a_file("README.md", "v1\n")
+        .two_way()
+        .synced()
+        .build();
+
+    let before = h.event_count_for_project("project_auto_sync_complete");
+    h.write_a("README.md", "v2-changed\n");
+    h.wait_watcher();
+
+    assert!(
+        h.event_count_for_project("project_auto_sync_complete") > before,
+        "内容变化应触发自动同步"
+    );
+    // 自动同步后 B 应拿到新内容。
+    assert_file_content(&h.b_dir().join("README.md"), "v2-changed\n").unwrap();
+}

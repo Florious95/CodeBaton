@@ -83,6 +83,7 @@ fn make_config(root: &Path, local_code: &Path, remote_code: &Path) -> SyncConfig
         refresh_interval_secs: 30,
         receive_port: 52000,
         default_file_receive_dir: None,
+        receive_dir_override: None,
         state_path: Some(root.join("state.toml")),
     }
 }
@@ -394,6 +395,7 @@ fn gui_instance_pushes_to_peer_serve_daemon() {
         refresh_interval_secs: 30,
         receive_port: port,
         default_file_receive_dir: None,
+        receive_dir_override: None,
         state_path: Some(b_root.join("state.toml")),
     };
     fs::create_dir_all(&b_root).unwrap();
@@ -452,6 +454,7 @@ fn gui_instance_pushes_to_peer_serve_daemon() {
         refresh_interval_secs: 30,
         receive_port: 52000,
         default_file_receive_dir: None,
+        receive_dir_override: None,
         state_path: Some(a_root.join("state.toml")),
     };
     fs::create_dir_all(&a_root).unwrap();
@@ -547,6 +550,7 @@ fn add_workspace_persists_entity_and_syncs_whole_root_tree() {
         refresh_interval_secs: 30,
         receive_port: free_port(),
         default_file_receive_dir: None,
+        receive_dir_override: None,
         state_path: Some(b_root.join("state.toml")),
     };
     let b_config_path = b_root.join("config.toml");
@@ -578,6 +582,7 @@ fn add_workspace_persists_entity_and_syncs_whole_root_tree() {
         refresh_interval_secs: 30,
         receive_port: free_port(),
         default_file_receive_dir: None,
+        receive_dir_override: None,
         state_path: Some(a_root.join("state.toml")),
     };
     fs::create_dir_all(&a_root).unwrap();

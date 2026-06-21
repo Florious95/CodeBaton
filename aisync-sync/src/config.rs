@@ -31,6 +31,10 @@ pub struct SyncConfig {
     pub refresh_interval_secs: u64,
     #[serde(default)]
     pub default_file_receive_dir: Option<PathBuf>,
+    /// 接收端落点显式覆盖。None 时退回 `AISYNC_RECEIVE_DIR` env / config 同级 `received/`。
+    /// 用于让每个 Backend 实例有独立接收目录，消除并行测试对全局 env 的依赖。
+    #[serde(default)]
+    pub receive_dir_override: Option<PathBuf>,
     #[serde(default)]
     pub state_path: Option<PathBuf>,
 }
@@ -52,6 +56,7 @@ impl SyncConfig {
             default_sync_mode: SyncModeConfig::default(),
             refresh_interval_secs: default_refresh_interval_secs(),
             default_file_receive_dir: None,
+            receive_dir_override: None,
             state_path: None,
         }
     }

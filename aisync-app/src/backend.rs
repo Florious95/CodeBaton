@@ -15,6 +15,7 @@ use std::future::Future;
 use std::io::{BufRead, BufReader, Read};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -39,7 +40,24 @@ use aisync_transport::{
     WorkspaceMappingAckPayload, WorkspaceMappingRequestPayload,
 };
 
-const AUTO_SYNC_COOLDOWN: Duration = Duration::from_secs(90);
+const DEFAULT_AUTO_SYNC_COOLDOWN: Duration = Duration::from_secs(90);
+/// 自动同步 cooldown 的可覆盖值。测试可在任何 Backend 启动前调一次
+/// `set_auto_sync_cooldown_for_test` 设为极短值，使 watcher 路径可确定性测试。
+/// 仅在进程启动早期设置一次（所有测试设相同值，不构成并行竞态）。
+static AUTO_SYNC_COOLDOWN_OVERRIDE: OnceLock<Duration> = OnceLock::new();
+
+fn auto_sync_cooldown() -> Duration {
+    AUTO_SYNC_COOLDOWN_OVERRIDE
+        .get()
+        .copied()
+        .unwrap_or(DEFAULT_AUTO_SYNC_COOLDOWN)
+}
+
+/// 测试钩子：设置自动同步 cooldown（仅首次生效；幂等）。
+pub fn set_auto_sync_cooldown_for_test(d: Duration) {
+    let _ = AUTO_SYNC_COOLDOWN_OVERRIDE.set(d);
+}
+
 const FILE_TRANSFER_CONTROL_TIMEOUT: Duration = Duration::from_secs(10);
 const HISTORY_FILE_LIMIT: usize = 5;
 static INCOMING_SYNC_SUPPRESSIONS: OnceLock<Mutex<HashMap<PathBuf, Instant>>> = OnceLock::new();
@@ -76,11 +94,19 @@ fn workspace_propagation_bypass() -> &'static Mutex<HashSet<String>> {
     WORKSPACE_PROPAGATION_BYPASS.get_or_init(|| Mutex::new(HashSet::new()))
 }
 
+/// incoming 防回环抑制窗口：必须 >= watcher debounce，否则接收端写入触发的 watcher
+/// 事件在抑制过期后才到达 → 误判为本地变更而反向回推（回环）。取 cooldown 与一个
+/// debounce 安全下限的较大者，使其既不被测试的短 cooldown 削穿，也随生产 cooldown 放大。
+fn incoming_suppress_window() -> Duration {
+    const MIN_WINDOW: Duration = Duration::from_secs(5); // > DEFAULT_DEBOUNCE(2s) + 余量
+    auto_sync_cooldown().max(MIN_WINDOW)
+}
+
 fn mark_incoming_sync_root(root: &Path) {
     incoming_sync_suppressions()
         .lock()
         .unwrap()
-        .insert(root.to_path_buf(), Instant::now() + AUTO_SYNC_COOLDOWN);
+        .insert(root.to_path_buf(), Instant::now() + incoming_suppress_window());
 }
 
 fn incoming_sync_recent(root: &Path) -> bool {
@@ -167,7 +193,7 @@ fn finish_auto_sync(gate_key: &str) {
         gate_key.to_string(),
         AutoSyncGate {
             in_flight: false,
-            cooldown_until: Instant::now() + AUTO_SYNC_COOLDOWN,
+            cooldown_until: Instant::now() + auto_sync_cooldown(),
         },
     );
 }
@@ -203,11 +229,16 @@ fn clear_workspace_first_propagation(workspace_name: &str, peer_name: &str) {
         .remove(&auto_sync_gate_key("workspace", workspace_name, peer_name));
 }
 
-/// Where an incoming push lands. Per-instance receive root next to the config.
-fn receive_root(config_path: &Path) -> PathBuf {
-    std::env::var("AISYNC_RECEIVE_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| config_path.with_file_name("received"))
+/// Where an incoming push lands. Resolution order:
+/// 1. `config.receive_dir_override` (explicit per-instance dir — parallel-safe, no global state)
+/// 2. `AISYNC_RECEIVE_DIR` env (legacy fallback)
+/// 3. `config_path` 同级 `received/`
+fn receive_root(config: &SyncConfig, config_path: &Path) -> PathBuf {
+    config
+        .receive_dir_override
+        .clone()
+        .or_else(|| std::env::var("AISYNC_RECEIVE_DIR").ok().map(PathBuf::from))
+        .unwrap_or_else(|| config_path.with_file_name("received"))
 }
 
 /// Local serve-daemon coordinates the GUI exposes for pairing / manual setup.
@@ -216,6 +247,26 @@ pub struct ServeInfo {
     pub port: u16,
     pub cert_path: PathBuf,
     pub receive_dir: PathBuf,
+}
+
+/// 停止 serve 守护：置 stop 标志，再 poke 端口一次唤醒阻塞的 `accept()`，
+/// 让守护循环检查标志后退出，释放 socket 与 runtime 线程。
+/// 用于测试结束防 orphan 线程，也用于 receiver 重启场景。
+pub struct ServeShutdownHandle {
+    stop: Arc<AtomicBool>,
+    port: u16,
+}
+
+impl ServeShutdownHandle {
+    /// 触发关闭：尽力而为，幂等。
+    pub fn shutdown(&self) {
+        self.stop.store(true, Ordering::SeqCst);
+        // poke 一次本地端口，唤醒守护里阻塞的 accept()，使其下一轮看到 stop。
+        let _ = std::net::TcpStream::connect_timeout(
+            &SocketAddr::from(([127, 0, 0, 1], self.port)),
+            Duration::from_millis(200),
+        );
+    }
 }
 
 /// Owns the long-lived backend state behind a single mutex.
@@ -232,12 +283,24 @@ pub struct Backend {
     file_receive_states: Arc<Mutex<HashMap<String, FileReceiveState>>>,
 }
 
+impl Drop for Backend {
+    fn drop(&mut self) {
+        // 停 serve 守护，防 orphan accept 线程在测试目录删除后继续写。
+        if let Ok(mut inner) = self.inner.lock() {
+            if let Some(handle) = inner.serve_shutdown.take() {
+                handle.shutdown();
+            }
+        }
+    }
+}
+
 struct Inner {
     config: SyncConfig,
     config_path: PathBuf,
     discoverer: MdnsDiscoverer,
     auto_sync_paused: bool,
     serve: Option<ServeInfo>,
+    serve_shutdown: Option<ServeShutdownHandle>,
     pairing_sessions: HashMap<DeviceId, PairingSession>,
     project_mapping_requests: HashMap<String, ProjectMappingRequestPayload>,
     outbound_project_mappings: HashMap<String, OutboundProjectMapping>,
@@ -351,7 +414,8 @@ impl Backend {
         let pending_file_transfer_requests = Arc::new(Mutex::new(VecDeque::new()));
         let pending_file_transfer_acks = Arc::new(Mutex::new(VecDeque::new()));
         let file_receive_states = Arc::new(Mutex::new(HashMap::new()));
-        let serve = start_serve_daemon(
+        let (serve, serve_shutdown) = match start_serve_daemon(
+            &config,
             &config_path,
             config.receive_port,
             Arc::clone(&pending_pairing_requests),
@@ -364,7 +428,10 @@ impl Backend {
             Arc::clone(&pending_file_transfer_acks),
             Arc::clone(&file_receive_states),
             None,
-        );
+        ) {
+            Some((info, handle)) => (Some(info), Some(handle)),
+            None => (None, None),
+        };
         if let Some(serve) = &serve {
             config.receive_port = serve.port;
         }
@@ -390,6 +457,7 @@ impl Backend {
                 discoverer,
                 auto_sync_paused: false,
                 serve,
+                serve_shutdown,
                 pairing_sessions: HashMap::new(),
                 project_mapping_requests: HashMap::new(),
                 outbound_project_mappings: HashMap::new(),
@@ -438,6 +506,7 @@ impl Backend {
                 discoverer,
                 auto_sync_paused: false,
                 serve: None,
+                serve_shutdown: None,
                 pairing_sessions: HashMap::new(),
                 project_mapping_requests: HashMap::new(),
                 outbound_project_mappings: HashMap::new(),
@@ -460,6 +529,15 @@ impl Backend {
         })
     }
 
+    /// 停止 serve 守护（若有）：唤醒阻塞的 accept、令守护循环退出、释放端口与线程。
+    /// 幂等。测试在 Backend drop 时自动调用以防 orphan 线程。
+    pub fn shutdown_serve(&self) {
+        let handle = self.inner.lock().unwrap().serve_shutdown.take();
+        if let Some(handle) = handle {
+            handle.shutdown();
+        }
+    }
+
     /// Like [`Backend::with_config`] but also starts the receive daemon (used
     /// by the GUI-to-GUI integration test). The daemon binds
     /// `config.receive_port`; pass a free port in tests to avoid conflicts.
@@ -474,7 +552,8 @@ impl Backend {
         let pending_file_transfer_requests = Arc::new(Mutex::new(VecDeque::new()));
         let pending_file_transfer_acks = Arc::new(Mutex::new(VecDeque::new()));
         let file_receive_states = Arc::new(Mutex::new(HashMap::new()));
-        let serve = start_serve_daemon(
+        let (serve, serve_shutdown) = match start_serve_daemon(
+            &config,
             &config_path,
             config.receive_port,
             Arc::clone(&pending_pairing_requests),
@@ -487,7 +566,10 @@ impl Backend {
             Arc::clone(&pending_file_transfer_acks),
             Arc::clone(&file_receive_states),
             Some(64),
-        );
+        ) {
+            Some((info, handle)) => (Some(info), Some(handle)),
+            None => (None, None),
+        };
         if let Some(serve) = &serve {
             config.receive_port = serve.port;
         }
@@ -508,6 +590,7 @@ impl Backend {
                 discoverer,
                 auto_sync_paused: false,
                 serve,
+                serve_shutdown,
                 pairing_sessions: HashMap::new(),
                 project_mapping_requests: HashMap::new(),
                 outbound_project_mappings: HashMap::new(),
@@ -2645,6 +2728,15 @@ impl Backend {
         };
 
         restore_excludes(&mut g.config, project_name, saved);
+        // run_tcp_push 把成功同步的快照写到了磁盘 config；这里同步回内存 config，
+        // 否则 check_split_brain 等读内存的逻辑看不到刚写的快照（in-memory/disk 不一致）。
+        if result.is_ok() {
+            if let Ok(persisted) = load_config(&g.config_path) {
+                if let Some(snap) = persisted.sync_snapshot(project_name, peer_name) {
+                    g.config.set_sync_snapshot(project_name, peer_name, snap);
+                }
+            }
+        }
         match &result {
             Ok(report) => app_log(
                 "sync_complete",
@@ -2806,6 +2898,51 @@ impl Backend {
             split_brain,
         }
     }
+
+    /// 解决脑裂：按用户选择「以哪端为准」执行覆盖（被覆盖方先整目录备份）。
+    /// - `PreferLocal`：以本端覆盖对端 = 确认覆盖推送（对端先备份，快照更新）。
+    /// - `PreferRemote`：以对端覆盖本端，需反向同步（pull）——当前未实现，返回错误。
+    pub fn resolve_split_brain(
+        &self,
+        project_name: &str,
+        peer_name: &str,
+        resolution: SplitBrainResolution,
+    ) -> Result<SyncReport> {
+        match resolution {
+            SplitBrainResolution::PreferLocal => {
+                app_log(
+                    "resolve_split_brain_prefer_local",
+                    &[
+                        ("project", project_name.to_string()),
+                        ("peer", peer_name.to_string()),
+                    ],
+                );
+                // 以本端为准 = 确认覆盖推送：对端原状进 .bak-*，再用本端覆盖，快照更新。
+                self.run_sync(project_name, peer_name, Direction::LocalToRemote, &[], true)
+            }
+            SplitBrainResolution::PreferRemote => {
+                app_log(
+                    "resolve_split_brain_prefer_remote_unimplemented",
+                    &[
+                        ("project", project_name.to_string()),
+                        ("peer", peer_name.to_string()),
+                    ],
+                );
+                Err(AisyncError::Transport(
+                    "resolve split-brain prefer-remote requires reverse sync (pull), not yet implemented".to_string(),
+                ))
+            }
+        }
+    }
+}
+
+/// 脑裂解决方向：以本端 / 对端为准。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SplitBrainResolution {
+    /// 以本端为准，覆盖对端（对端先备份）。
+    PreferLocal,
+    /// 以对端为准，覆盖本端（本端先备份）。当前未实现（需反向同步）。
+    PreferRemote,
 }
 
 /// 推送前脑裂/覆盖检测结果，供前端决定弹哪种确认框。
@@ -3698,7 +3835,47 @@ fn directory_bytes(root: &Path) -> Result<u64> {
     Ok(total)
 }
 
+/// 测试可观测事件计数：按 event 名累计。让黑盒测试无需解析日志、无需等 90s
+/// cooldown 即可断言「自动同步是否触发 / 是否因 incoming 抑制 / 指纹门是否命中」。
+/// 生产开销 = 一次哈希 + 计数，可忽略。
+static EVENT_COUNTERS: OnceLock<Mutex<HashMap<String, u64>>> = OnceLock::new();
+
+fn record_event(event: &str, fields: &[(&str, String)]) {
+    let counters = EVENT_COUNTERS.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Ok(mut map) = counters.lock() {
+        *map.entry(event.to_string()).or_insert(0) += 1;
+        // 同时按 event:<project|name> 复合键计数，让并行测试用唯一项目名做隔离断言。
+        if let Some((_, scope)) = fields
+            .iter()
+            .find(|(k, _)| *k == "project" || *k == "name")
+        {
+            *map.entry(format!("{event}:{scope}")).or_insert(0) += 1;
+        }
+    }
+}
+
+/// 读取某事件迄今累计次数（测试用；进程级全局）。
+/// 传 `"event"` 取全局总数；传 `"event:project-name"` 取该项目的计数（并行隔离）。
+pub fn event_count(event: &str) -> u64 {
+    EVENT_COUNTERS
+        .get()
+        .and_then(|m| m.lock().ok())
+        .and_then(|map| map.get(event).copied())
+        .unwrap_or(0)
+}
+
+/// 重置事件计数（测试隔离用；进程级全局——并行测试应针对**特定项目名**断言增量，
+/// 不依赖绝对值，故一般无需 reset）。
+pub fn reset_event_counts() {
+    if let Some(m) = EVENT_COUNTERS.get() {
+        if let Ok(mut map) = m.lock() {
+            map.clear();
+        }
+    }
+}
+
 fn app_log(event: &str, fields: &[(&str, String)]) {
+    record_event(event, fields);
     let mut line = format!("[aisync-app] event={event}");
     for (key, value) in fields {
         let encoded = serde_json::to_string(value).unwrap_or_else(|_| "\"<encode-error>\"".into());
@@ -4680,7 +4857,7 @@ fn start_project_watcher(
                 if fingerprint.is_some() {
                     last_fingerprint = fingerprint;
                 }
-                suppress_until = Some(Instant::now() + AUTO_SYNC_COOLDOWN);
+                suppress_until = Some(Instant::now() + auto_sync_cooldown());
                 continue;
             }
             let Some(gate_key) =
@@ -4752,7 +4929,7 @@ fn start_project_watcher(
                 }
             }
             finish_auto_sync(&gate_key);
-            suppress_until = Some(Instant::now() + AUTO_SYNC_COOLDOWN);
+            suppress_until = Some(Instant::now() + auto_sync_cooldown());
         }
     });
 
@@ -4916,7 +5093,7 @@ fn start_workspace_watcher(
                 if fingerprint.is_some() {
                     last_fingerprint = fingerprint;
                 }
-                suppress_until = Some(Instant::now() + AUTO_SYNC_COOLDOWN);
+                suppress_until = Some(Instant::now() + auto_sync_cooldown());
                 continue;
             }
             let gate_key = if bypass_pending {
@@ -5021,7 +5198,7 @@ fn start_workspace_watcher(
                 }
             }
             finish_auto_sync(&gate_key);
-            suppress_until = Some(Instant::now() + AUTO_SYNC_COOLDOWN);
+            suppress_until = Some(Instant::now() + auto_sync_cooldown());
         }
     });
 
@@ -9054,6 +9231,7 @@ mod tests {
 /// the config so a peer can pin it. Returns connection coordinates, or `None`
 /// if binding fails (e.g. port in use) — the UI still works, just can't receive.
 fn start_serve_daemon(
+    config: &SyncConfig,
     config_path: &Path,
     port: u16,
     pending_pairing_requests: Arc<Mutex<VecDeque<PairingRequestPayload>>>,
@@ -9066,8 +9244,8 @@ fn start_serve_daemon(
     pending_file_transfer_acks: Arc<Mutex<VecDeque<FileTransferAckPayload>>>,
     file_receive_states: Arc<Mutex<HashMap<String, FileReceiveState>>>,
     receive_limit: Option<usize>,
-) -> Option<ServeInfo> {
-    let receive_dir = receive_root(config_path);
+) -> Option<(ServeInfo, ServeShutdownHandle)> {
+    let receive_dir = receive_root(config, config_path);
     let cert_path = receiver_cert_path(config_path);
     if let Err(e) = fs::create_dir_all(&receive_dir) {
         eprintln!("[aisync-app] receive dir create failed: {e}");
@@ -9115,6 +9293,9 @@ fn start_serve_daemon(
     ));
     let history_config_path = config_path.to_path_buf();
     let history_receive_dir = receive_dir.clone();
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_loop = Arc::clone(&stop);
 
     // Production runs for the process lifetime; tests pass a finite limit.
     std::thread::spawn(move || {
@@ -9282,6 +9463,10 @@ fn start_serve_daemon(
             };
             let mut handled = 0usize;
             loop {
+                if stop_loop.load(Ordering::SeqCst) {
+                    log_line("[aisync-app] receive daemon stop requested");
+                    break;
+                }
                 if receive_limit
                     .map(|limit| handled >= limit)
                     .unwrap_or(false)
@@ -9353,11 +9538,14 @@ fn start_serve_daemon(
         });
     });
 
-    Some(ServeInfo {
-        port: bound,
-        cert_path,
-        receive_dir,
-    })
+    Some((
+        ServeInfo {
+            port: bound,
+            cert_path,
+            receive_dir,
+        },
+        ServeShutdownHandle { stop, port: bound },
+    ))
 }
 
 /// Map the UI sync-mode label to the config enum.
