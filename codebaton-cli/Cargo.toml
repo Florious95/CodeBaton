@@ -1,0 +1,17 @@
+[package]
+name = "codebaton-cli"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+codebaton-core.workspace = true
+codebaton-session = { path = "../codebaton-session" }
+codebaton-sync = { path = "../codebaton-sync" }
+codebaton-transport.workspace = true
+clap.workspace = true
+indicatif.workspace = true
+tokio = { version = "1", features = ["rt-multi-thread"] }
+
+[[bin]]
+name = "codebaton-cli"
+path = "src/main.rs"

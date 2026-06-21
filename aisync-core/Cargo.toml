@@ -1,9 +1,0 @@
-[package]
-name = "aisync-core"
-edition.workspace = true
-version.workspace = true
-
-[dependencies]
-serde.workspace = true
-serde_json.workspace = true
-uuid.workspace = true

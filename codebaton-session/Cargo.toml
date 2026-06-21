@@ -1,0 +1,12 @@
+[package]
+name = "codebaton-session"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+codebaton-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

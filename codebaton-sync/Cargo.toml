@@ -1,0 +1,16 @@
+[package]
+name = "codebaton-sync"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+codebaton-core.workspace = true
+codebaton-transport.workspace = true
+blake3.workspace = true
+notify.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+
+[dev-dependencies]
+codebaton-session = { path = "../codebaton-session" }

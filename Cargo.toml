@@ -1,12 +1,12 @@
 [workspace]
 members = [
-    "aisync-app",
-    "aisync-cli",
-    "aisync-core",
-    "aisync-discovery",
-    "aisync-session",
-    "aisync-sync",
-    "aisync-transport",
+    "codebaton-app",
+    "codebaton-cli",
+    "codebaton-core",
+    "codebaton-discovery",
+    "codebaton-session",
+    "codebaton-sync",
+    "codebaton-transport",
 ]
 resolver = "2"
 
@@ -15,8 +15,8 @@ edition = "2021"
 version = "0.1.0"
 
 [workspace.dependencies]
-aisync-core = { path = "aisync-core" }
-aisync-transport = { path = "aisync-transport" }
+codebaton-core = { path = "codebaton-core" }
+codebaton-transport = { path = "codebaton-transport" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 uuid = { version = "1", features = ["serde", "v4"] }

@@ -18,111 +18,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "aisync-app"
-version = "0.1.0"
-dependencies = [
- "aisync-core",
- "aisync-discovery",
- "aisync-session",
- "aisync-sync",
- "aisync-transport",
- "blake3",
- "libc",
- "serde",
- "serde_json",
- "tauri",
- "tauri-build",
- "tauri-plugin-dialog",
- "tauri-plugin-notification",
- "tempfile",
- "tokio",
- "uuid",
-]
-
-[[package]]
-name = "aisync-cli"
-version = "0.1.0"
-dependencies = [
- "aisync-core",
- "aisync-session",
- "aisync-sync",
- "aisync-transport",
- "clap",
- "indicatif",
- "tokio",
-]
-
-[[package]]
-name = "aisync-core"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "uuid",
-]
-
-[[package]]
-name = "aisync-discovery"
-version = "0.1.0"
-dependencies = [
- "aisync-core",
- "blake3",
- "ed25519-dalek",
- "keyring",
- "libc",
- "mdns-sd",
- "rand_core 0.6.4",
- "serde",
- "serde_json",
- "tempfile",
- "uuid",
-]
-
-[[package]]
-name = "aisync-session"
-version = "0.1.0"
-dependencies = [
- "aisync-core",
- "serde",
- "serde_json",
- "tempfile",
-]
-
-[[package]]
-name = "aisync-sync"
-version = "0.1.0"
-dependencies = [
- "aisync-core",
- "aisync-session",
- "aisync-transport",
- "blake3",
- "notify",
- "serde",
- "serde_json",
- "toml 0.8.2",
-]
-
-[[package]]
-name = "aisync-transport"
-version = "0.1.0"
-dependencies = [
- "aisync-core",
- "blake3",
- "fast_rsync",
- "globset",
- "rayon",
- "rcgen",
- "rustls",
- "serde",
- "serde_json",
- "tar",
- "tempfile",
- "tokio",
- "tokio-rustls",
- "walkdir",
-]
-
-[[package]]
 name = "alloc-no-stdlib"
 version = "2.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -739,6 +634,111 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c0f78a02292a74a88ac736019ab962ece0bc380e3f977bf72e376c5d78ff0678"
 dependencies = [
  "cc",
+]
+
+[[package]]
+name = "codebaton-app"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "codebaton-core",
+ "codebaton-discovery",
+ "codebaton-session",
+ "codebaton-sync",
+ "codebaton-transport",
+ "libc",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-dialog",
+ "tauri-plugin-notification",
+ "tempfile",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "codebaton-cli"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "codebaton-core",
+ "codebaton-session",
+ "codebaton-sync",
+ "codebaton-transport",
+ "indicatif",
+ "tokio",
+]
+
+[[package]]
+name = "codebaton-core"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "uuid",
+]
+
+[[package]]
+name = "codebaton-discovery"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "codebaton-core",
+ "ed25519-dalek",
+ "keyring",
+ "libc",
+ "mdns-sd",
+ "rand_core 0.6.4",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "uuid",
+]
+
+[[package]]
+name = "codebaton-session"
+version = "0.1.0"
+dependencies = [
+ "codebaton-core",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "codebaton-sync"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "codebaton-core",
+ "codebaton-session",
+ "codebaton-transport",
+ "notify",
+ "serde",
+ "serde_json",
+ "toml 0.8.2",
+]
+
+[[package]]
+name = "codebaton-transport"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "codebaton-core",
+ "fast_rsync",
+ "globset",
+ "rayon",
+ "rcgen",
+ "rustls",
+ "serde",
+ "serde_json",
+ "tar",
+ "tempfile",
+ "tokio",
+ "tokio-rustls",
+ "walkdir",
 ]
 
 [[package]]
