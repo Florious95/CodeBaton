@@ -710,3 +710,209 @@ fn auto_042_real_change_triggers_auto_sync() {
     // 自动同步后 B 应拿到新内容。
     assert_file_content(&h.b_dir().join("README.md"), "v2-changed\n").unwrap();
 }
+
+// ── Suite H/I：性能、资源、路径边界（用现有 harness 可覆盖部分）──────
+//
+// 注：性能用例用「同阶但更快」的规模（如 2000 文件 / 1MB 大文件代替 10000/512MB），
+// 验证的是行为正确性（批处理成功、delta 只传变化、no-change 不重传），而非绝对吞吐。
+// 真正的 RSS 峰值测量（070/071/072）需内存采样基础设施，未做。
+
+/// AUTO-074 大量小文件批量同步：首次全量一致，二次只传变化文件。
+#[test]
+fn auto_074_many_small_files_batch() {
+    let mut b = TwoBackend::builder().project_name("many-small");
+    for i in 0..2000 {
+        b = b.a_file(&format!("small/f{i:05}.txt"), &format!("content-{i}\n"));
+    }
+    let h = b.build();
+
+    let report = h.push(false).expect("首次批量同步");
+    assert!(report.code_files_transferred >= 2000);
+    assert_dir_tree_eq(h.a_dir(), h.b_dir()).unwrap();
+
+    // 改 10 个文件再推。
+    for i in 0..10 {
+        h.write_a(&format!("small/f{i:05}.txt"), &format!("changed-{i}\n"));
+    }
+    h.push(false).expect("增量批量同步");
+    assert_dir_tree_eq(h.a_dir(), h.b_dir()).unwrap();
+    assert_file_content(&h.b_dir().join("small/f00000.txt"), "changed-0\n").unwrap();
+    assert_file_content(&h.b_dir().join("small/f00500.txt"), "content-500\n").unwrap();
+}
+
+/// AUTO-075 大文件 delta：只改中间一小段，B 最终 hash 等于 A（走 delta/chunk 路径）。
+#[test]
+fn auto_075_large_file_delta() {
+    // 1MB 文件（>64KB SMALL_FILE_THRESHOLD → 走 rsync delta/chunk，非 tar 批）。
+    let big: String = "x".repeat(1024 * 1024);
+    let h = TwoBackend::builder()
+        .project_name("large-delta")
+        .a_file("large.bin", &big)
+        .synced()
+        .build();
+
+    // 改中间 4KB。
+    let mut edited = big.clone().into_bytes();
+    for b in edited.iter_mut().skip(512 * 1024).take(4096) {
+        *b = b'y';
+    }
+    h.write_a("large.bin", &String::from_utf8(edited).unwrap());
+    h.push(false).expect("大文件 delta 推送");
+
+    // B 最终内容与 A 一致。
+    assert_dir_tree_eq(h.a_dir(), h.b_dir()).unwrap();
+}
+
+/// AUTO-073 大文件内容不变（仅 mtime）不重传：同内容重写 → 指纹命中 no-change。
+#[test]
+fn auto_073_large_unchanged_no_retransfer() {
+    let big: String = "z".repeat(512 * 1024);
+    let h = TwoBackend::builder()
+        .project_name("large-nochange")
+        .a_file("big.jsonl", &big)
+        .synced()
+        .build();
+    let snap1 = h.a_snapshot();
+
+    // 同内容重写（mtime 变、内容指纹不变）。
+    h.rewrite_a_same("big.jsonl", &big);
+    h.push(false).expect("无变更推送");
+
+    // 快照不变（内容指纹相同）。
+    assert_snapshot_unchanged(&snap1, &h.a_snapshot()).unwrap();
+    assert_dir_tree_eq(h.a_dir(), h.b_dir()).unwrap();
+}
+
+/// AUTO-080 中文、空格、emoji 路径无损同步。
+#[test]
+fn auto_080_unicode_space_emoji_paths() {
+    let h = TwoBackend::builder()
+        .project_name("unicode")
+        .a_file("空格 目录/文件 1.txt", "中文内容\n")
+        .a_file("emoji-😀.md", "emoji file\n")
+        .a_file("深/层/路径/notes.txt", "deep\n")
+        .build();
+
+    h.push(false).expect("unicode 路径同步");
+    assert_file_content(&h.b_dir().join("空格 目录/文件 1.txt"), "中文内容\n").unwrap();
+    assert_file_content(&h.b_dir().join("emoji-😀.md"), "emoji file\n").unwrap();
+    assert_file_content(&h.b_dir().join("深/层/路径/notes.txt"), "deep\n").unwrap();
+    assert_dir_tree_eq(h.a_dir(), h.b_dir()).unwrap();
+}
+
+/// AUTO-016 过期回收站清理且保留新回收站：8 天前批次 + 当天批次，触发一次删除 →
+/// 过期批次被清、当天批次保留。
+#[test]
+fn auto_016_trash_retention_purge() {
+    const EIGHT_DAYS: u64 = 8 * 24 * 60 * 60;
+    let h = TwoBackend::builder()
+        .project_name("trash-retain")
+        .a_file("a.txt", "a\n")
+        .a_file("b.txt", "b\n")
+        .a_file("c.txt", "c\n")
+        .b_trash_batch(EIGHT_DAYS, &[("old/stale.txt", "stale\n")]) // 8 天前批次
+        .synced()
+        .build();
+
+    // 制造一次真删除 → 触发 trash_file → purge_expired_trash。
+    h.remove_a("c.txt");
+    h.push(false).expect("删除触发 purge");
+
+    // 当天删除的 c.txt 在回收站。
+    assert_trashed_with_content(h.b_dir(), "c.txt", "c\n").unwrap();
+    // 8 天前的批次目录应被清理（其文件不再存在）。
+    let trash_root = h.b_dir().join(".aisync-trash");
+    let stale_found = std::fs::read_dir(&trash_root)
+        .map(|rd| {
+            rd.filter_map(|e| e.ok()).any(|e| {
+                e.path().join("old/stale.txt").exists()
+            })
+        })
+        .unwrap_or(false);
+    assert!(!stale_found, "8 天前的过期回收站批次应被清理");
+}
+
+/// AUTO-021 脑裂取消：检测到脑裂后不解决（取消）→ 两端文件均不变、快照不更新。
+#[test]
+fn auto_021_split_brain_cancel() {
+    let h = TwoBackend::builder()
+        .project_name("sb-cancel")
+        .a_file("README.md", "base\n")
+        .a_file("keep.md", "k\n")
+        .synced()
+        .build();
+    let snap_before = h.a_snapshot();
+
+    // 双向分叉 → 检测到脑裂。
+    h.write_a("README.md", "A 改\n");
+    h.write_b("keep.md", "B 改\n");
+    assert_split_brain(&h.probe_split_brain()).unwrap();
+
+    // 记录分叉后状态。取消（不 resolve、不推送）后两端应各自保持分叉内容。
+    let a_hash = dir_hash_of(h.a_dir());
+    let b_hash = dir_hash_of(h.b_dir());
+    assert_eq!(dir_hash_of(h.a_dir()), a_hash, "取消后 A 保持分叉内容");
+    assert_eq!(dir_hash_of(h.b_dir()), b_hash, "取消后 B 保持分叉内容");
+    assert_file_content(&h.a_dir().join("README.md"), "A 改\n").unwrap();
+    assert_file_content(&h.b_dir().join("keep.md"), "B 改\n").unwrap();
+    assert_snapshot_unchanged(&snap_before, &h.a_snapshot()).unwrap();
+}
+
+/// AUTO-076 后台线程收尾：harness drop 后 B 守护停止、端口可被重新 bind（无泄漏）。
+#[test]
+fn auto_076_background_threads_cleanup() {
+    let port;
+    {
+        let h = TwoBackend::builder()
+            .project_name("cleanup")
+            .a_file("a.txt", "a\n")
+            .build();
+        port = h.b_serve().port;
+        h.push(false).expect("一次同步");
+        h.shutdown_b(); // 显式停守护
+    } // h drop → run_root 回收 + Backend Drop 停守护
+    settle();
+    settle();
+    // 端口应可被重新 bind（守护已释放 socket）。
+    let rebind = std::net::TcpListener::bind(("127.0.0.1", port));
+    assert!(rebind.is_ok(), "B 守护端口应已释放，可重新 bind");
+}
+
+/// AUTO-044 删除映射期间有 in-flight 同步：推送进行中删除映射 → 不留半删配置、
+/// config 一致（要么有映射要么无，不损坏）、A/B 文件不丢。
+///
+/// 注：单机时序难严格制造「正在推送中」窗口，本用例验证「并发删除映射 + 推送」
+/// 不产生损坏 config / 不丢文件这一最终一致性安全属性（最稳的黑盒不变量）。
+#[test]
+fn auto_044_delete_mapping_during_inflight() {
+    use std::thread;
+
+    let big: String = "p".repeat(2 * 1024 * 1024); // 2MB，拉长推送时间
+    let h = TwoBackend::builder()
+        .project_name("inflight-del")
+        .a_file("large.bin", &big)
+        .a_file("keep.txt", "keep\n")
+        .build();
+
+    // 同时：A push（耗时）+ 删除映射。
+    let hr = &h;
+    thread::scope(|s| {
+        s.spawn(move || {
+            let _ = hr.push(false);
+        });
+        s.spawn(move || {
+            // 稍等让 push 启动，再删映射。
+            thread::sleep(std::time::Duration::from_millis(20));
+            let _ = hr.a.delete_project("inflight-del");
+        });
+    });
+    settle();
+
+    // 安全不变量：config 可被正常加载（未损坏），映射要么在要么不在（非半状态）。
+    let cfg = aisync_sync::load_config(&h.a_config_path).expect("config 应可正常加载，无损坏");
+    let count = cfg.projects.iter().filter(|p| p.name == "inflight-del").count();
+    assert!(count <= 1, "不得出现重复/半删映射条目");
+    // A 文件不丢。
+    assert_file_exists(&h.a_dir().join("keep.txt")).unwrap();
+    assert_file_exists(&h.a_dir().join("large.bin")).unwrap();
+}

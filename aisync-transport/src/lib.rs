@@ -4069,6 +4069,32 @@ mod tests {
         );
     }
 
+    /// AUTO-082 路径穿越防护：checked_relative_path 必须拒绝 `..`、绝对路径、root，
+    /// 只接受目标目录内的普通相对路径，防止写到 RUN_ROOT 外。
+    #[test]
+    fn path_traversal_is_rejected() {
+        // 恶意路径全部拒绝。
+        for bad in [
+            "../outside.txt",
+            "a/../../escape.txt",
+            "/tmp/evil",
+            "/etc/passwd",
+            "../../x",
+        ] {
+            assert!(
+                checked_relative_path(bad).is_err(),
+                "应拒绝穿越路径: {bad}"
+            );
+        }
+        // 正常相对路径（含 ./ 归一化）接受。
+        assert!(checked_relative_path("src/main.rs").is_ok());
+        assert!(checked_relative_path("./a/b.txt").is_ok());
+        assert_eq!(
+            checked_relative_path("./a/b.txt").unwrap(),
+            std::path::PathBuf::from("a/b.txt")
+        );
+    }
+
     #[test]
     fn diff_classifies_added_modified_deleted_and_unchanged() {
         let source = SyncManifest {
