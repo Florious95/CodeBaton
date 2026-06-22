@@ -959,17 +959,6 @@ pub(crate) fn refresh_and_save_workspaces(config_path: &Path) -> Option<SyncConf
     Some(refreshed)
 }
 
-fn mark_incoming_session_roots(config_path: &Path) {
-    if let Ok(config) = load_config(config_path) {
-        if let Some(path) = local_claude_projects_root(&config) {
-            mark_incoming_sync_root(&path);
-        }
-    }
-    if let Some(path) = local_codex_sessions_dir() {
-        mark_incoming_sync_root(&path);
-    }
-}
-
 fn safe_relative_path(relative: &str) -> Option<PathBuf> {
     let path = Path::new(relative);
     if path.is_absolute() {

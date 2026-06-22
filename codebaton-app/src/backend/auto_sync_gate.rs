@@ -6,7 +6,6 @@
 //! `super::app_log` for structured logging.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -30,7 +29,6 @@ pub fn set_auto_sync_cooldown_for_test(d: Duration) {
     let _ = AUTO_SYNC_COOLDOWN_OVERRIDE.set(d);
 }
 
-static INCOMING_SYNC_SUPPRESSIONS: OnceLock<Mutex<HashMap<PathBuf, Instant>>> = OnceLock::new();
 static AUTO_SYNC_GATES: OnceLock<Mutex<HashMap<String, AutoSyncGate>>> = OnceLock::new();
 static SESSION_BASELINE_SEEDS: OnceLock<Mutex<HashMap<String, SessionBaseline>>> = OnceLock::new();
 
@@ -47,31 +45,12 @@ pub(crate) struct SessionBaseline {
     pub(crate) sync_fingerprint: Option<String>,
 }
 
-pub(crate) fn incoming_sync_suppressions() -> &'static Mutex<HashMap<PathBuf, Instant>> {
-    INCOMING_SYNC_SUPPRESSIONS.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
 pub(crate) fn auto_sync_gates() -> &'static Mutex<HashMap<String, AutoSyncGate>> {
     AUTO_SYNC_GATES.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 pub(crate) fn session_baseline_seeds() -> &'static Mutex<HashMap<String, SessionBaseline>> {
     SESSION_BASELINE_SEEDS.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-/// incoming 防回环抑制窗口：必须 >= watcher debounce，否则接收端写入触发的 watcher
-/// 事件在抑制过期后才到达 → 误判为本地变更而反向回推（回环）。取 cooldown 与一个
-/// debounce 安全下限的较大者，使其既不被测试的短 cooldown 削穿，也随生产 cooldown 放大。
-pub(crate) fn incoming_suppress_window() -> Duration {
-    const MIN_WINDOW: Duration = Duration::from_secs(5); // > DEFAULT_DEBOUNCE(2s) + 余量
-    auto_sync_cooldown().max(MIN_WINDOW)
-}
-
-pub(crate) fn mark_incoming_sync_root(root: &Path) {
-    incoming_sync_suppressions()
-        .lock()
-        .unwrap()
-        .insert(root.to_path_buf(), Instant::now() + incoming_suppress_window());
 }
 
 pub(crate) fn auto_sync_gate_key(scope: &str, name: &str, peer: &str) -> String {

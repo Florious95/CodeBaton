@@ -12,9 +12,8 @@ use codebaton_sync::{load_config, ProjectConfig, SyncConfig, WorkspaceConfig};
 use super::{
     app_log, claude_mtime_paths, codex_session_file_matches_project,
     codex_session_file_matches_workspace, collect_jsonl_files, local_codex_sessions_dir,
-    manifest_file_type, mark_incoming_session_roots, mark_incoming_sync_root,
-    refresh_and_save_workspaces, safe_relative_path, should_skip_hash_path, Backend,
-    HISTORY_FILE_LIMIT,
+    manifest_file_type, refresh_and_save_workspaces, safe_relative_path, should_skip_hash_path,
+    Backend, HISTORY_FILE_LIMIT,
 };
 
 impl Backend {
@@ -462,14 +461,11 @@ pub(crate) fn record_receiver_sync_history(
     let path = config_path.with_file_name("history.jsonl");
     let bytes: u64 = manifest.files.iter().map(|file| file.size).sum();
     let file_type = manifest_file_type(manifest);
-    let (project_id, workspace_name, child_name, suppress_root) =
+    // Manual handoff: receiving a push no longer suppresses any outbound
+    // auto-sync (there is none), so the incoming-root / session-root marking is
+    // gone. We only record receiver history here.
+    let (project_id, workspace_name, child_name, _suppress_root) =
         receiver_history_scope(config_path, manifest);
-    if let Some(root) = suppress_root.as_deref().or(Some(receive_dir)) {
-        mark_incoming_sync_root(root);
-    }
-    if matches!(file_type, "session" | "mixed") {
-        mark_incoming_session_roots(config_path);
-    }
     let event_id = codebaton_discovery::new_pairing_request_id();
     let entry = serde_json::json!({
         "eventId": event_id,
