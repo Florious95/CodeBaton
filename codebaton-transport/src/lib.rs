@@ -3373,11 +3373,21 @@ fn commit_staging_with_options(
     // 1. 覆盖/新增：staging 中每个文件原子写入 target。
     //    先消解类型冲突（target 端同名路径是目录、或祖先是文件），冲突节点移入回收站
     //    可恢复——否则 fs::write 会因 File exists / Is a directory 失败导致整次同步中断。
+    //
+    //    备份不可省略（任何覆盖都先备份）：增量模式下若被覆盖的 target 文件已存在且
+    //    内容不同，先把旧内容快照进回收站，再写新内容——使增量覆盖同样可逆。
+    //    force 模式已整目录备份到 .bak-*，故此处不重复快照。
     for relative in &staging_files {
         let source = staging.join(relative);
         let destination = target_dir.join(relative);
         resolve_type_conflict(target_dir, relative, &destination)?;
         let data = fs::read(&source)?;
+        if !confirm_overwrite && destination.is_file() {
+            let existing = fs::read(&destination)?;
+            if existing != data {
+                snapshot_before_overwrite(target_dir, relative, &destination, &existing)?;
+            }
+        }
         write_file_atomic(&destination, &data)?;
     }
 
@@ -3487,6 +3497,28 @@ fn trash_dir(target_dir: &Path, relative: &Path, victim: &Path) -> Result<()> {
 }
 
 /// 删除前把文件移入 `<target_dir>/.aisync-trash/<时间戳>/<relative>` 回收站，保留 7 天。
+/// 增量覆盖前快照：把即将被覆盖的旧文件内容复制进回收站（按原相对路径），使覆盖可逆。
+/// 与 trash_file 不同——这里是 copy（旧路径随后会被新内容写回），不是 move。
+fn snapshot_before_overwrite(
+    target_dir: &Path,
+    relative: &Path,
+    _victim: &Path,
+    existing: &[u8],
+) -> Result<()> {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_else(|_| Duration::from_secs(0))
+        .as_secs();
+    let trash_root = target_dir.join(".aisync-trash").join(stamp.to_string());
+    let grave = trash_root.join(relative);
+    if let Some(parent) = grave.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(&grave, existing)?;
+    purge_expired_trash(target_dir);
+    Ok(())
+}
+
 fn trash_file(target_dir: &Path, relative: &Path, victim: &Path) -> Result<()> {
     if !victim.exists() {
         return Ok(());

@@ -129,6 +129,31 @@ fn auto_013_delete_to_trash() {
     assert_trashed_with_content(h.b_dir(), "notes/todo.md", "todo\n").unwrap();
 }
 
+/// AUTO-019 备份不可省略：增量（非强制）覆盖既有文件时，被覆盖的旧内容应快照进
+/// 回收站、可恢复；目标拿到新内容。即「任何覆盖都先备份」也覆盖增量路径。
+#[test]
+fn auto_019_incremental_overwrite_also_backs_up() {
+    let h = TwoBackend::builder()
+        .a_file("README.md", "v1-original\n")
+        .a_file("keep.txt", "stable\n")
+        .synced()
+        .build();
+
+    // A 改 README → 增量推送（不勾强制）。
+    h.write_a("README.md", "v2-new\n");
+    h.push(false).expect("增量覆盖推送");
+
+    // 目标拿到新内容。
+    assert_file_content(&h.b_dir().join("README.md"), "v2-new\n").unwrap();
+    // 旧内容应在回收站可恢复（增量覆盖也先备份）。
+    assert_trashed_with_content(h.b_dir(), "README.md", "v1-original\n").unwrap();
+    // 未变文件不应被快照进回收站（只快照真正被覆盖的）。
+    assert!(
+        assert_trashed_with_content(h.b_dir(), "keep.txt", "stable\n").is_err(),
+        "未变文件不应进回收站"
+    );
+}
+
 /// AUTO-014 大比例删除触发安全阀。
 #[test]
 fn auto_014_safety_valve_aborts() {
