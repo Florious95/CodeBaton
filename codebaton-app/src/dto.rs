@@ -419,3 +419,31 @@ pub struct ServeInfoDto {
     pub receive_dir: String,
 }
 
+/// 交接清单预览：列出本次手动交接会带走的代码 + 各 AI 工具对话，
+/// 已按排除规则剔除编译产物；total_size 为剔除后实际传输字节。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HandoffManifestDto {
+    pub code_files: Vec<HandoffFileDto>,
+    pub sessions: Vec<HandoffSessionGroupDto>,
+    pub total_size: u64,
+    /// 是否基于上次交接快照增量（false = 首次/全量）。
+    pub incremental: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HandoffFileDto {
+    pub rel_path: String,
+    pub size: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HandoffSessionGroupDto {
+    /// AI 工具名（"claude" / "codex" / …）。
+    pub tool: String,
+    pub file_count: u32,
+    pub bytes: u64,
+}
+

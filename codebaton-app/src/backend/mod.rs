@@ -97,7 +97,8 @@ use self::sync_push::run_workspace_tcp_push;
 mod claude_paths;
 use self::claude_paths::*;
 mod exclude;
-use self::exclude::{project_exclude_rules, workspace_exclude_rules};
+mod handoff_preview;
+pub use self::handoff_preview::{HandoffPreview, PreviewFile, PreviewSessionGroup};
 mod messaging;
 #[cfg(test)]
 use self::messaging::record_text_message_history;

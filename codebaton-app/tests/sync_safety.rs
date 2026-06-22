@@ -236,6 +236,63 @@ fn auto_030_pure_chat_sync() {
     assert!(h.b_has_session_marker("marker-pure-chat-001"), "B 应能检索到会话 marker");
 }
 
+/// AUTO-PREVIEW-1 交接清单预览：列出代码文件、排除编译产物、计入 AI 对话、
+/// total_size 非零；首次预览为全量，成功推送后再预览为增量。
+#[test]
+fn preview_lists_files_excludes_artifacts_and_sessions() {
+    let h = TwoBackend::builder()
+        .a_file("src/main.rs", "fn main() {}\n")
+        .a_file("README.md", "hello\n")
+        .a_file("target/debug/junk.o", "BUILD ARTIFACT\n")
+        .a_file("node_modules/dep/index.js", "module\n")
+        .build();
+    // 一条 Claude 对话，应进入 sessions 分组。
+    h.write_a_claude_session("preview-session", "marker-preview-001");
+
+    // 首次预览：尚无快照 → 全量。
+    let preview = h
+        .a
+        .preview_handoff(&h.project_name, &h.peer_name)
+        .expect("预览应成功");
+
+    // 代码文件应含 src/main.rs 与 README.md。
+    let code_paths: Vec<&str> = preview
+        .code_files
+        .iter()
+        .map(|f| f.rel_path.as_str())
+        .collect();
+    assert!(code_paths.iter().any(|p| p.ends_with("main.rs")), "应列出 main.rs");
+    assert!(code_paths.iter().any(|p| p.ends_with("README.md")), "应列出 README.md");
+
+    // 编译产物 / 依赖目录必须被排除。
+    assert!(
+        !code_paths.iter().any(|p| p.contains("target/")),
+        "target/ 编译产物应被排除"
+    );
+    assert!(
+        !code_paths.iter().any(|p| p.contains("node_modules/")),
+        "node_modules/ 应被排除"
+    );
+
+    // AI 对话应进入 sessions（Claude 至少一组、至少一文件）。
+    assert!(
+        preview.sessions.iter().any(|s| s.tool == "claude" && s.file_count >= 1),
+        "应列出 Claude 对话分组"
+    );
+
+    // total_size 应为剔除后实际传输字节，非零。
+    assert!(preview.total_size > 0, "总大小应非零");
+    assert!(!preview.incremental, "首次预览应为全量（无快照）");
+
+    // 成功推送建立快照后，再预览应为增量。
+    h.push(false).expect("推送应成功");
+    let preview2 = h
+        .a
+        .preview_handoff(&h.project_name, &h.peer_name)
+        .expect("二次预览应成功");
+    assert!(preview2.incremental, "推送后应识别为增量");
+}
+
 // ── Suite F：TLS、证书与连接异常 ────────────────────────────────────
 
 /// AUTO-052 close_notify EOF 回归（接收端落盘但发送端失败）——本框架既有 transport

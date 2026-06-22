@@ -1412,6 +1412,40 @@ pub fn check_target_not_empty(
         .map_err(|e| e.to_string())
 }
 
+/// 交接清单预览：本地 dry-run，列出会带走的代码 + 各 AI 工具对话、已排除产物的
+/// 总大小、是否增量。前端在点推送前据此展示清单与强制覆盖勾选。
+#[tauri::command]
+pub fn preview_handoff(
+    backend: State<Backend>,
+    project_id: String,
+    peer_name: String,
+) -> std::result::Result<HandoffManifestDto, String> {
+    let preview = backend
+        .preview_handoff(&project_id, &peer_name)
+        .map_err(|e| e.to_string())?;
+    Ok(HandoffManifestDto {
+        code_files: preview
+            .code_files
+            .into_iter()
+            .map(|f| HandoffFileDto {
+                rel_path: f.rel_path,
+                size: f.size,
+            })
+            .collect(),
+        sessions: preview
+            .sessions
+            .into_iter()
+            .map(|s| HandoffSessionGroupDto {
+                tool: s.tool.to_string(),
+                file_count: s.file_count as u32,
+                bytes: s.bytes,
+            })
+            .collect(),
+        total_size: preview.total_size,
+        incremental: preview.incremental,
+    })
+}
+
 // ── Sync (push only) — real SyncCoordinator on a worker thread ──────
 
 #[tauri::command]

@@ -106,6 +106,7 @@ pub fn run() {
             commands::resolve_conflict,
             commands::get_rewrite_report,
             commands::check_target_not_empty,
+            commands::preview_handoff,
             commands::start_sync,
             commands::cancel_sync,
             commands::add_project,
