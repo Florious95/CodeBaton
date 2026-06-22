@@ -297,6 +297,24 @@ export interface ScannedChild {
 }
 
 export type GlobalStatus = "idle" | "syncing" | "conflict";
+export interface HandoffFile {
+  relPath: string;
+  size: number;
+}
+
+export interface HandoffSessionGroup {
+  tool: string;
+  fileCount: number;
+  bytes: number;
+}
+
+export interface HandoffManifest {
+  codeFiles: HandoffFile[];
+  sessions: HandoffSessionGroup[];
+  totalSize: number;
+  incremental: boolean;
+}
+
 export interface StatusBar {
   primaryPeer: string | null;
   primaryPeerOnline: boolean;

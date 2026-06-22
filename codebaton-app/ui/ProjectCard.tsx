@@ -19,29 +19,12 @@ export function ProjectCard({ project }: { project: Project }) {
     }
   };
 
-  const startSyncNow = (confirmOverwrite = false) => {
+  const sync = () => {
+    // Manual handoff is push-only: open the handoff manifest preview, which
+    // lists what will be carried, shows the total size, and offers the
+    // force-overwrite option (peer originals are backed up before any merge).
     setSelectedProjectId(project.id);
-    ipc.startSync(project.id, [], confirmOverwrite).catch(() => {});
-    setDialog({ kind: "syncProgress" });
-  };
-
-  const sync = async () => {
-    setSelectedProjectId(project.id);
-    // Manual handoff is push-only. Before pushing, check whether the peer's
-    // target dir is non-empty; if so, confirm overwrite (peer originals are
-    // backed up to <name>.bak-<timestamp> before the merge).
-    let notEmpty = false;
-    try {
-      notEmpty = await ipc.checkTargetNotEmpty(project.id, project.peerName);
-    } catch (e) {
-      pushToast(`${t.overwriteCheckFailed}: ${e}`);
-      return;
-    }
-    if (notEmpty) {
-      setDialog({ kind: "overwriteConfirm", projectId: project.id, peerName: project.peerName });
-      return;
-    }
-    startSyncNow();
+    setDialog({ kind: "handoffPreview", projectId: project.id, peerName: project.peerName });
   };
 
   return (

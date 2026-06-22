@@ -13,6 +13,7 @@ import { pushToast, useStore } from "./store";
 import type {
   BatchPlan,
   Conflict,
+  HandoffManifest,
   Pairing,
   ProjectMappingRequest,
   RewriteReport,
@@ -909,8 +910,8 @@ function UnpairDialog({ peerId }: { peerId: string }) {
   );
 }
 
-// ── Overwrite confirm (push into a non-empty target) ─────────────────
-function OverwriteConfirmDialog({
+// ── Handoff preview (manifest before a manual push) ──────────────────
+function HandoffPreviewDialog({
   projectId,
   peerName,
 }: {
@@ -918,41 +919,73 @@ function OverwriteConfirmDialog({
   peerName: string;
 }) {
   const { setDialog, setSelectedProjectId, t } = useStore();
+  const [manifest, setManifest] = useState<HandoffManifest | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [force, setForce] = useState(false);
+
+  useEffect(() => {
+    ipc
+      .previewHandoff(projectId, peerName)
+      .then(setManifest)
+      .catch((e) => setError(String(e)));
+  }, [projectId, peerName]);
+
+  const start = () => {
+    setSelectedProjectId(projectId);
+    ipc.startSync(projectId, [], force).catch(() => {});
+    setDialog({ kind: "syncProgress" });
+  };
+
   return (
     <Dialog
-      title={t.overwriteConfirmTitle}
-      icon={<ShieldAlert size={18} color="var(--red)" />}
-      width={460}
-      closeOnOverlay={false}
-      onClose={() => {
-        ipc.uiLog("overwrite_confirmed action=cancel");
-        setDialog(null);
-      }}
+      title={t.handoffTitle}
+      icon={<FolderSearch size={18} color="var(--blue)" />}
+      width={520}
+      onClose={() => setDialog(null)}
       footer={
         <>
-          <button
-            onClick={() => {
-              ipc.uiLog("overwrite_confirmed action=cancel");
-              setDialog(null);
-            }}
-          >
-            {t.cancel}
-          </button>
-          <button
-            className="danger"
-            onClick={() => {
-              ipc.uiLog("overwrite_confirmed action=proceed");
-              setSelectedProjectId(projectId);
-              ipc.startSync(projectId, [], true).catch(() => {});
-              setDialog({ kind: "syncProgress" });
-            }}
-          >
-            {t.overwriteConfirmProceed}
+          <button onClick={() => setDialog(null)}>{t.cancel}</button>
+          <button className="primary" disabled={!manifest} onClick={start}>
+            {t.handoffStart}
           </button>
         </>
       }
     >
-      <p style={{ lineHeight: 1.8 }}>{t.overwriteConfirmBody(peerName)}</p>
+      {error ? (
+        <p style={{ color: "var(--red)" }}>{t.handoffFailed}: {error}</p>
+      ) : !manifest ? (
+        <p className="muted">{t.handoffLoading}</p>
+      ) : (
+        <>
+          <div className="row" style={{ gap: 14, marginBottom: 10 }}>
+            <span>
+              {t.handoffCode}: <b>{manifest.codeFiles.length}</b> {t.files}
+            </span>
+            <span>
+              {t.handoffSessions}:{" "}
+              <b>{manifest.sessions.reduce((s, g) => s + g.fileCount, 0)}</b> {t.files}
+            </span>
+            <span>
+              {t.handoffTotalSize}: <b>{fmtBytes(manifest.totalSize)}</b>
+            </span>
+          </div>
+          <p className="muted" style={{ marginBottom: 10 }}>
+            {manifest.incremental ? t.handoffIncremental : t.handoffFull}
+          </p>
+          {manifest.sessions.length > 0 && (
+            <div className="muted" style={{ marginBottom: 10 }}>
+              {manifest.sessions
+                .map((g) => `${g.tool}: ${g.fileCount} ${t.files} (${fmtBytes(g.bytes)})`)
+                .join("  ·  ")}
+            </div>
+          )}
+          <p className="faint" style={{ marginBottom: 12 }}>{t.handoffExcludedHint}</p>
+          <label className="row" style={{ gap: 8, cursor: "pointer" }}>
+            <input type="checkbox" checked={force} onChange={(e) => setForce(e.target.checked)} />
+            <span>{t.handoffForceOverwrite}</span>
+          </label>
+        </>
+      )}
     </Dialog>
   );
 }
@@ -1312,8 +1345,8 @@ export function DialogHost() {
       return <ExcludeRulesDialog projectId={dialog.projectId} />;
     case "unpair":
       return <UnpairDialog peerId={dialog.peerId} />;
-    case "overwriteConfirm":
-      return <OverwriteConfirmDialog projectId={dialog.projectId} peerName={dialog.peerName} />;
+    case "handoffPreview":
+      return <HandoffPreviewDialog projectId={dialog.projectId} peerName={dialog.peerName} />;
     case "syncProgress":
       return <SyncProgressDialog />;
     case "rewriteReport":

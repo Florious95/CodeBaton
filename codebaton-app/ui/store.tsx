@@ -31,7 +31,7 @@ export type DialogState =
   | { kind: "excludeRules"; projectId: string }
   | { kind: "unpair"; peerId: string }
   | { kind: "syncProgress" }
-  | { kind: "overwriteConfirm"; projectId: string; peerName: string }
+  | { kind: "handoffPreview"; projectId: string; peerName: string }
   | { kind: "rewriteReport"; projectId: string }
   | { kind: "discovered"; workspaceId: string }
   | { kind: "wizard" };

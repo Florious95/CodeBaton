@@ -10,6 +10,7 @@ import type {
   Conflict,
   FileTransferRequest,
   FileTransferRecord,
+  HandoffManifest,
   PendingFileTransfer,
   LocalInfo,
   Overview,
@@ -150,8 +151,9 @@ export const ipc = {
   getRewriteReport: (projectId: string) =>
     call<RewriteReport>("get_rewrite_report", { projectId }),
 
-  checkTargetNotEmpty: (projectId: string, peerName: string) =>
-    call<boolean>("check_target_not_empty", { projectId, peerName }),
+  // 交接清单预览：本地 dry-run，列出会带走的代码 + 各 AI 工具对话、总大小、是否增量。
+  previewHandoff: (projectId: string, peerName: string) =>
+    call<HandoffManifest>("preview_handoff", { projectId, peerName }),
 
   // 手动交接仅支持推送（本地 → 对端）。
   startSync: (
