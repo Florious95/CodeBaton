@@ -409,7 +409,6 @@ pub struct StatusBarDto {
     pub syncing_percent: Option<u8>,
     pub conflict_project: Option<String>,
     pub last_sync: Option<String>,
-    pub auto_sync_paused: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

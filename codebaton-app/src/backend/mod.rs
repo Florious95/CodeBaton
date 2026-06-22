@@ -102,16 +102,14 @@ mod claude_paths;
 use self::claude_paths::*;
 mod watchers;
 use self::watchers::{
-    project_exclude_rules, project_watch_paths, start_project_watchers, start_workspace_watchers,
-    workspace_exclude_rules, workspace_watch_paths,
+    project_exclude_rules, project_watch_paths, workspace_exclude_rules, workspace_watch_paths,
 };
 mod messaging;
 #[cfg(test)]
 use self::messaging::record_text_message_history;
 mod session_scanner;
 use self::session_scanner::{
-    refresh_workspaces_in_config, session_mtime_targets, start_session_mtime_scanner,
-    SessionMtimeTarget,
+    refresh_workspaces_in_config, session_mtime_targets, SessionMtimeTarget,
 };
 #[cfg(test)]
 use self::session_scanner::{classify_session_mtime, SessionMtimeDecision};
@@ -203,7 +201,6 @@ struct Inner {
     config: SyncConfig,
     config_path: PathBuf,
     discoverer: MdnsDiscoverer,
-    auto_sync_paused: bool,
     serve: Option<ServeInfo>,
     serve_shutdown: Option<ServeShutdownHandle>,
     pairing_sessions: HashMap<DeviceId, PairingSession>,
@@ -311,16 +308,16 @@ impl Backend {
         // Best-effort: failing to start mDNS (no network) must not break the UI.
         let _ = discoverer.start();
 
-        let project_watchers = start_project_watchers(&config_path, &config);
-        let workspace_watchers = start_workspace_watchers(&config_path, &config);
-        start_session_mtime_scanner(config_path.clone(), config.clone());
+        // Manual handoff: no background watchers or session scanner are started.
+        // Sync happens only on explicit user push.
+        let project_watchers = HashMap::new();
+        let workspace_watchers = HashMap::new();
 
         Ok(Self {
             inner: Mutex::new(Inner {
                 config,
                 config_path,
                 discoverer,
-                auto_sync_paused: false,
                 serve,
                 serve_shutdown,
                 pairing_sessions: HashMap::new(),
@@ -361,15 +358,14 @@ impl Backend {
         disco_cfg.local_device.id = config.device.id;
         disco_cfg.local_device.addresses = local_device_addresses();
         let discoverer = MdnsDiscoverer::new(disco_cfg)?;
-        let project_watchers = start_project_watchers(&config_path, &config);
-        let workspace_watchers = start_workspace_watchers(&config_path, &config);
+        let project_watchers = HashMap::new();
+        let workspace_watchers = HashMap::new();
 
         Ok(Self {
             inner: Mutex::new(Inner {
                 config,
                 config_path,
                 discoverer,
-                auto_sync_paused: false,
                 serve: None,
                 serve_shutdown: None,
                 pairing_sessions: HashMap::new(),
@@ -445,15 +441,14 @@ impl Backend {
             disco_cfg.receiver_cert_der = fs::read(&serve.cert_path).ok();
         }
         let discoverer = MdnsDiscoverer::new(disco_cfg)?;
-        let project_watchers = start_project_watchers(&config_path, &config);
-        let workspace_watchers = start_workspace_watchers(&config_path, &config);
+        let project_watchers = HashMap::new();
+        let workspace_watchers = HashMap::new();
 
         Ok(Self {
             inner: Mutex::new(Inner {
                 config,
                 config_path,
                 discoverer,
-                auto_sync_paused: false,
                 serve,
                 serve_shutdown,
                 pairing_sessions: HashMap::new(),
@@ -629,14 +624,6 @@ impl Backend {
                 installed: false,
             },
         ]
-    }
-
-    pub fn auto_sync_paused(&self) -> bool {
-        self.inner.lock().unwrap().auto_sync_paused
-    }
-
-    pub fn set_auto_sync_paused(&self, paused: bool) {
-        self.inner.lock().unwrap().auto_sync_paused = paused;
     }
 
     pub fn local_device(&self) -> DeviceInfo {
@@ -3060,8 +3047,10 @@ mod tests {
         );
     }
 
+    // Manual handoff: the backend must NOT start any background watchers for
+    // existing workspaces — sync happens only on explicit user push.
     #[test]
-    fn with_config_starts_watchers_for_existing_workspaces() {
+    fn with_config_starts_no_watchers_for_existing_workspaces() {
         let tmp = tempfile::tempdir().unwrap();
         let workspace_root = tmp.path().join("workspace");
         fs::create_dir_all(&workspace_root).unwrap();
@@ -3083,12 +3072,9 @@ mod tests {
         });
         let backend = Backend::with_config(config, tmp.path().join("config.toml")).unwrap();
 
-        assert!(backend
-            .inner
-            .lock()
-            .unwrap()
-            .workspace_watchers
-            .contains_key("workspace"));
+        let inner = backend.inner.lock().unwrap();
+        assert!(inner.workspace_watchers.is_empty());
+        assert!(inner.project_watchers.is_empty());
     }
 
     #[test]

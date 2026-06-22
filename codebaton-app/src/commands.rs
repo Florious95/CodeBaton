@@ -652,7 +652,6 @@ pub fn get_status_bar(backend: State<Backend>) -> StatusBarDto {
         syncing_percent: None,
         conflict_project: None,
         last_sync: None,
-        auto_sync_paused: backend.auto_sync_paused(),
     }
 }
 
@@ -1391,24 +1390,6 @@ pub fn get_rewrite_report(
         rewritten: Vec::new(),
         skipped: Vec::new(),
     })
-}
-
-// ── Auto-sync pause (X5) ─────────────────────────────────────────────
-
-#[tauri::command]
-pub fn set_auto_sync_paused(
-    state: State<AppState>,
-    backend: State<Backend>,
-    app: AppHandle,
-    paused: bool,
-) {
-    backend.set_auto_sync_paused(paused);
-    let _ = tray::refresh(&app, &state, &backend);
-}
-
-#[tauri::command]
-pub fn get_auto_sync_paused(backend: State<Backend>) -> bool {
-    backend.auto_sync_paused()
 }
 
 // ── Overwrite safety: is the peer's target dir non-empty? ────────────

@@ -105,8 +105,6 @@ pub fn run() {
             commands::get_conflict,
             commands::resolve_conflict,
             commands::get_rewrite_report,
-            commands::set_auto_sync_paused,
-            commands::get_auto_sync_paused,
             commands::check_target_not_empty,
             commands::check_split_brain,
             commands::start_sync,
