@@ -9,10 +9,7 @@ use codebaton_transport::{
 };
 
 use super::transport::{project_mapping_ack_connection, send_project_mapping_ack};
-use super::{
-    app_log, project_config, start_project_watcher, sync_mode_from_label, with_endpoint_first,
-    Backend,
-};
+use super::{app_log, project_config, sync_mode_from_label, with_endpoint_first, Backend};
 
 impl Backend {
     pub fn take_pending_project_mapping_request(&self) -> Option<ProjectMappingRequestPayload> {
@@ -133,17 +130,6 @@ impl Backend {
             save_config(&config_path, &candidate)?;
             g.config = candidate.clone();
             g.project_mapping_requests.remove(request_id);
-            if let Some(project) = candidate
-                .projects
-                .iter()
-                .find(|project| project.name == ack.project_name.as_str())
-                .cloned()
-            {
-                g.project_watchers.remove(&project.name);
-                if let Some(watcher) = start_project_watcher(&config_path, &candidate, &project) {
-                    g.project_watchers.insert(project.name.clone(), watcher);
-                }
-            }
         }
         app_log(
             "project_mapping_confirmed",
@@ -182,21 +168,16 @@ impl Backend {
                 AisyncError::Config("project mapping ack did not include remote_dir".to_string())
             })?;
             let mut candidate = g.config.clone();
-            let project = project_config(
+            candidate.projects.push(project_config(
                 outbound.project_name.clone(),
                 outbound.local_dir.clone(),
                 outbound.peer_name.clone(),
                 remote_dir.clone(),
                 outbound.mode,
-            );
-            candidate.projects.push(project.clone());
+            ));
             let path = g.config_path.clone();
             save_config(&path, &candidate)?;
             g.config = candidate.clone();
-            g.project_watchers.remove(&project.name);
-            if let Some(watcher) = start_project_watcher(&path, &candidate, &project) {
-                g.project_watchers.insert(project.name.clone(), watcher);
-            }
             processed += 1;
             app_log(
                 "project_mapping_ack_applied",
@@ -265,15 +246,12 @@ impl Backend {
         // validated write succeeds — this is the rollback that fixes the
         // "failed add still leaves a phantom project" bug.
         let mut candidate = g.config.clone();
-        let project = project_config(name, local, peer_name, remote, mode);
-        candidate.projects.push(project.clone());
+        candidate
+            .projects
+            .push(project_config(name, local, peer_name, remote, mode));
         let path = g.config_path.clone();
         save_config(&path, &candidate)?;
         g.config = candidate.clone();
-        g.project_watchers.remove(&project.name);
-        if let Some(watcher) = start_project_watcher(&path, &candidate, &project) {
-            g.project_watchers.insert(project.name.clone(), watcher);
-        }
         app_log(
             "project_mapping_created",
             &[
@@ -303,7 +281,6 @@ impl Backend {
         let path = g.config_path.clone();
         save_config(&path, &candidate)?;
         g.config = candidate;
-        g.project_watchers.remove(project_name);
         app_log(
             "project_mapping_deleted",
             &[("project", project_name.to_string())],

@@ -19,7 +19,7 @@ use super::transport::{
 };
 use super::{
     app_log, control_connection_for_peer, live_connection_for_config_peer,
-    seed_session_baselines_for_workspace, start_workspace_watcher, sync_mode_from_label,
+    seed_session_baselines_for_workspace, sync_mode_from_label,
     sync_mode_label, with_endpoint_first, workspace_children, workspace_config,
     workspace_config_with_child_names, replace_workspace, Backend,
 };
@@ -304,10 +304,6 @@ impl Backend {
             save_config(&config_path, &candidate)?;
             g.config = candidate.clone();
             g.workspace_mapping_requests.remove(request_id);
-            g.workspace_watchers.remove(&workspace.name);
-            if let Some(watcher) = start_workspace_watcher(&config_path, &candidate, &workspace) {
-                g.workspace_watchers.insert(workspace.name.clone(), watcher);
-            }
         }
         app_log(
             "workspace_entity_created",
@@ -385,11 +381,6 @@ impl Backend {
                 let config_path = g.config_path.clone();
                 save_config(&config_path, &candidate)?;
                 g.config = candidate.clone();
-                g.workspace_watchers.remove(&workspace.name);
-                if let Some(watcher) = start_workspace_watcher(&config_path, &candidate, &workspace)
-                {
-                    g.workspace_watchers.insert(workspace.name.clone(), watcher);
-                }
                 processed += 1;
                 app_log(
                     "workspace_ack_applied",

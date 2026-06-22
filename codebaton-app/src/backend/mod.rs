@@ -100,10 +100,8 @@ mod sync_push;
 use self::sync_push::{run_tcp_push, run_workspace_tcp_push};
 mod claude_paths;
 use self::claude_paths::*;
-mod watchers;
-use self::watchers::{
-    project_exclude_rules, project_watch_paths, workspace_exclude_rules, workspace_watch_paths,
-};
+mod exclude;
+use self::exclude::{project_exclude_rules, workspace_exclude_rules};
 mod messaging;
 #[cfg(test)]
 use self::messaging::record_text_message_history;
@@ -210,8 +208,6 @@ struct Inner {
     outbound_workspace_mappings: HashMap<String, OutboundWorkspaceMapping>,
     file_transfer_requests: HashMap<String, FileTransferRequestPayload>,
     outbound_file_transfers: HashMap<String, OutboundFileTransfer>,
-    project_watchers: HashMap<String, FsWatcher>,
-    workspace_watchers: HashMap<String, FsWatcher>,
 }
 
 #[derive(Clone)]
@@ -310,9 +306,6 @@ impl Backend {
 
         // Manual handoff: no background watchers or session scanner are started.
         // Sync happens only on explicit user push.
-        let project_watchers = HashMap::new();
-        let workspace_watchers = HashMap::new();
-
         Ok(Self {
             inner: Mutex::new(Inner {
                 config,
@@ -327,8 +320,6 @@ impl Backend {
                 outbound_workspace_mappings: HashMap::new(),
                 file_transfer_requests: HashMap::new(),
                 outbound_file_transfers: HashMap::new(),
-                project_watchers,
-                workspace_watchers,
             }),
             pending_pairing_requests,
             pending_project_mapping_requests,
@@ -358,9 +349,6 @@ impl Backend {
         disco_cfg.local_device.id = config.device.id;
         disco_cfg.local_device.addresses = local_device_addresses();
         let discoverer = MdnsDiscoverer::new(disco_cfg)?;
-        let project_watchers = HashMap::new();
-        let workspace_watchers = HashMap::new();
-
         Ok(Self {
             inner: Mutex::new(Inner {
                 config,
@@ -375,8 +363,6 @@ impl Backend {
                 outbound_workspace_mappings: HashMap::new(),
                 file_transfer_requests: HashMap::new(),
                 outbound_file_transfers: HashMap::new(),
-                project_watchers,
-                workspace_watchers,
             }),
             pending_pairing_requests,
             pending_project_mapping_requests,
@@ -441,9 +427,6 @@ impl Backend {
             disco_cfg.receiver_cert_der = fs::read(&serve.cert_path).ok();
         }
         let discoverer = MdnsDiscoverer::new(disco_cfg)?;
-        let project_watchers = HashMap::new();
-        let workspace_watchers = HashMap::new();
-
         Ok(Self {
             inner: Mutex::new(Inner {
                 config,
@@ -458,8 +441,6 @@ impl Backend {
                 outbound_workspace_mappings: HashMap::new(),
                 file_transfer_requests: HashMap::new(),
                 outbound_file_transfers: HashMap::new(),
-                project_watchers,
-                workspace_watchers,
             }),
             pending_pairing_requests,
             pending_project_mapping_requests,
@@ -1202,484 +1183,6 @@ fn workspace_children(
     }
     children.sort_by(|left, right| left.name.cmp(&right.name));
     Ok(children)
-}
-
-pub(crate) fn start_project_watcher(
-    config_path: &Path,
-    config: &SyncConfig,
-    project: &ProjectConfig,
-) -> Option<FsWatcher> {
-    if !project.enabled {
-        return None;
-    }
-    let peer_name = project.peers.keys().next()?.clone();
-    let paths = project_watch_paths(config, project);
-    if paths.is_empty() {
-        return None;
-    }
-    let (tx, rx) = mpsc::channel();
-    let watcher = FsWatcher::start(
-        WatchConfig {
-            paths: paths.clone(),
-            debounce: codebaton_sync::DEFAULT_DEBOUNCE,
-            exclude_rules: project_exclude_rules(config, project),
-        },
-        tx,
-    )
-    .map_err(|error| {
-        app_log(
-            "project_watch_failed",
-            &[
-                ("project", project.name.clone()),
-                ("local_root", project.local.display().to_string()),
-                ("error", error.to_string()),
-            ],
-        );
-        error
-    })
-    .ok()?;
-
-    let config_path = config_path.to_path_buf();
-    let fallback_config = config.clone();
-    let project_name = project.name.clone();
-    let project_root = project.local.clone();
-    let initial_fingerprint = project_auto_sync_fingerprint(config, &project_name, &peer_name);
-    std::thread::spawn(move || {
-        let mut suppress_until: Option<Instant> = None;
-        let mut last_fingerprint = initial_fingerprint;
-        while let Ok(batch) = rx.recv() {
-            let config = load_config(&config_path).unwrap_or_else(|_| fallback_config.clone());
-            let fingerprint = project_auto_sync_fingerprint(&config, &project_name, &peer_name);
-            if suppress_until
-                .map(|until| Instant::now() < until)
-                .unwrap_or(false)
-            {
-                if let Some(fingerprint) = fingerprint {
-                    app_log(
-                        "baseline_updated",
-                        &[
-                            ("scope", "project".to_string()),
-                            ("name", project_name.clone()),
-                            ("peer", peer_name.clone()),
-                            ("trigger", "watcher_cooldown".to_string()),
-                            ("hash", hash_prefix(&fingerprint)),
-                        ],
-                    );
-                    last_fingerprint = Some(fingerprint);
-                }
-                app_log(
-                    "project_auto_sync_suppressed",
-                    &[
-                        ("project", project_name.clone()),
-                        ("peer", peer_name.clone()),
-                        ("reason", "cooldown".to_string()),
-                        ("change_count", batch.changes.len().to_string()),
-                    ],
-                );
-                continue;
-            }
-            app_log(
-                "project_change_detected",
-                &[
-                    ("project", project_name.clone()),
-                    ("change_count", batch.changes.len().to_string()),
-                ],
-            );
-            if fingerprint.is_some() && fingerprint == last_fingerprint {
-                app_log(
-                    "sync_fingerprint_gate_hit",
-                    &[
-                        ("scope", "project".to_string()),
-                        ("name", project_name.clone()),
-                        ("peer", peer_name.clone()),
-                        ("trigger", "watcher".to_string()),
-                        (
-                            "hash",
-                            fingerprint
-                                .as_ref()
-                                .map(|hash| hash_prefix(hash))
-                                .unwrap_or_default(),
-                        ),
-                    ],
-                );
-                continue;
-            }
-            if let Some(fingerprint) = &fingerprint {
-                app_log(
-                    "sync_fingerprint_gate_miss",
-                    &[
-                        ("scope", "project".to_string()),
-                        ("name", project_name.clone()),
-                        ("peer", peer_name.clone()),
-                        ("trigger", "watcher".to_string()),
-                        ("hash", hash_prefix(fingerprint)),
-                        (
-                            "previous",
-                            last_fingerprint
-                                .as_ref()
-                                .map(|previous| hash_prefix(previous))
-                                .unwrap_or_default(),
-                        ),
-                    ],
-                );
-            }
-            if incoming_sync_recent(&project_root) {
-                app_log(
-                    "auto_sync_suppressed",
-                    &[
-                        ("scope", "project".to_string()),
-                        ("name", project_name.clone()),
-                        ("peer", peer_name.clone()),
-                        ("reason", "incoming_receive".to_string()),
-                    ],
-                );
-                if fingerprint.is_some() {
-                    last_fingerprint = fingerprint;
-                }
-                suppress_until = Some(Instant::now() + auto_sync_cooldown());
-                continue;
-            }
-            let Some(gate_key) =
-                try_begin_auto_sync("project", &project_name, &peer_name, "watcher")
-            else {
-                if let Some(fingerprint) = fingerprint {
-                    last_fingerprint = Some(fingerprint);
-                }
-                continue;
-            };
-            match run_project_auto_sync(&config_path, &config, &project_name, &peer_name, None) {
-                Ok(report) => {
-                    let post_config = load_config(&config_path).unwrap_or_else(|_| config.clone());
-                    if let Some(post_fingerprint) =
-                        project_auto_sync_fingerprint(&post_config, &project_name, &peer_name)
-                    {
-                        app_log(
-                            "baseline_updated",
-                            &[
-                                ("scope", "project".to_string()),
-                                ("name", project_name.clone()),
-                                ("peer", peer_name.clone()),
-                                ("trigger", "watcher".to_string()),
-                                ("hash", hash_prefix(&post_fingerprint)),
-                            ],
-                        );
-                        last_fingerprint = Some(post_fingerprint);
-                    }
-                    let files =
-                        (report.code_files_transferred + report.session_files_transferred) as u32;
-                    record_auto_sync_history(
-                        &config_path,
-                        &project_name,
-                        true,
-                        files,
-                        None,
-                        None,
-                        None,
-                        "mixed",
-                    );
-                    app_log(
-                        "project_auto_sync_complete",
-                        &[
-                            ("project", project_name.clone()),
-                            ("peer", peer_name.clone()),
-                            ("file_count", files.to_string()),
-                        ],
-                    );
-                }
-                Err(error) => {
-                    record_auto_sync_history(
-                        &config_path,
-                        &project_name,
-                        false,
-                        0,
-                        Some(error.to_string()),
-                        None,
-                        None,
-                        "mixed",
-                    );
-                    app_log(
-                        "project_auto_sync_failed",
-                        &[
-                            ("project", project_name.clone()),
-                            ("peer", peer_name.clone()),
-                            ("error", error.to_string()),
-                        ],
-                    );
-                }
-            }
-            finish_auto_sync(&gate_key);
-            suppress_until = Some(Instant::now() + auto_sync_cooldown());
-        }
-    });
-
-    app_log(
-        "project_watch_started",
-        &[
-            ("project", project.name.clone()),
-            ("local_root", project.local.display().to_string()),
-            ("path_count", paths.len().to_string()),
-        ],
-    );
-    Some(watcher)
-}
-
-pub(crate) fn start_workspace_watcher(
-    config_path: &Path,
-    config: &SyncConfig,
-    workspace: &WorkspaceConfig,
-) -> Option<FsWatcher> {
-    if !workspace.enabled {
-        return None;
-    }
-    let local_root = workspace.effective_local_root().to_path_buf();
-    let paths = workspace_watch_paths(config, workspace);
-    if paths.is_empty() {
-        return None;
-    }
-    let (tx, rx) = mpsc::channel();
-    let watcher = FsWatcher::start(
-        WatchConfig {
-            paths: paths.clone(),
-            debounce: codebaton_sync::DEFAULT_DEBOUNCE,
-            exclude_rules: workspace_exclude_rules(config, workspace),
-        },
-        tx,
-    )
-    .map_err(|error| {
-        app_log(
-            "workspace_watch_failed",
-            &[
-                ("workspace", workspace.name.clone()),
-                ("local_root", local_root.display().to_string()),
-                ("error", error.to_string()),
-            ],
-        );
-        error
-    })
-    .ok()?;
-
-    let config_path = config_path.to_path_buf();
-    let fallback_config = config.clone();
-    let workspace_name = workspace.name.clone();
-    let workspace_root = local_root.clone();
-    let initial_fingerprint = workspace_auto_sync_fingerprint(config, workspace);
-    std::thread::spawn(move || {
-        let mut suppress_until: Option<Instant> = None;
-        let mut last_fingerprint = initial_fingerprint;
-        while let Ok(batch) = rx.recv() {
-            let config = load_config(&config_path).unwrap_or_else(|_| fallback_config.clone());
-            let Some(workspace) = config
-                .workspaces
-                .iter()
-                .find(|workspace| workspace.name == workspace_name)
-                .cloned()
-            else {
-                continue;
-            };
-            let peer_name = workspace.effective_peer().unwrap_or_default().to_string();
-            let bypass_pending = workspace_first_propagation_pending(&workspace_name, &peer_name);
-            let fingerprint = workspace_auto_sync_fingerprint(&config, &workspace);
-            if !bypass_pending
-                && suppress_until
-                    .map(|until| Instant::now() < until)
-                    .unwrap_or(false)
-            {
-                if let Some(fingerprint) = fingerprint {
-                    app_log(
-                        "baseline_updated",
-                        &[
-                            ("scope", "workspace".to_string()),
-                            ("name", workspace_name.clone()),
-                            ("peer", peer_name.clone()),
-                            ("trigger", "watcher_cooldown".to_string()),
-                            ("hash", hash_prefix(&fingerprint)),
-                        ],
-                    );
-                    last_fingerprint = Some(fingerprint);
-                }
-                app_log(
-                    "workspace_auto_sync_suppressed",
-                    &[
-                        ("workspace", workspace_name.clone()),
-                        ("reason", "cooldown".to_string()),
-                        ("change_count", batch.changes.len().to_string()),
-                    ],
-                );
-                continue;
-            }
-            app_log(
-                "workspace_change_detected",
-                &[
-                    ("workspace", workspace_name.clone()),
-                    ("change_count", batch.changes.len().to_string()),
-                ],
-            );
-            if !bypass_pending && fingerprint.is_some() && fingerprint == last_fingerprint {
-                app_log(
-                    "sync_fingerprint_gate_hit",
-                    &[
-                        ("scope", "workspace".to_string()),
-                        ("name", workspace_name.clone()),
-                        ("trigger", "watcher".to_string()),
-                        (
-                            "hash",
-                            fingerprint
-                                .as_ref()
-                                .map(|hash| hash_prefix(hash))
-                                .unwrap_or_default(),
-                        ),
-                    ],
-                );
-                continue;
-            }
-            if let Some(fingerprint) = &fingerprint {
-                app_log(
-                    "sync_fingerprint_gate_miss",
-                    &[
-                        ("scope", "workspace".to_string()),
-                        ("name", workspace_name.clone()),
-                        ("trigger", "watcher".to_string()),
-                        ("hash", hash_prefix(fingerprint)),
-                        (
-                            "previous",
-                            last_fingerprint
-                                .as_ref()
-                                .map(|previous| hash_prefix(previous))
-                                .unwrap_or_default(),
-                        ),
-                    ],
-                );
-            }
-            if incoming_sync_recent(&workspace_root) {
-                app_log(
-                    "auto_sync_suppressed",
-                    &[
-                        ("scope", "workspace".to_string()),
-                        ("name", workspace_name.clone()),
-                        ("reason", "incoming_receive".to_string()),
-                    ],
-                );
-                if fingerprint.is_some() {
-                    last_fingerprint = fingerprint;
-                }
-                suppress_until = Some(Instant::now() + auto_sync_cooldown());
-                continue;
-            }
-            let gate_key = if bypass_pending {
-                begin_auto_sync_bypass_cooldown(
-                    "workspace",
-                    &workspace_name,
-                    &peer_name,
-                    "new_child",
-                )
-            } else {
-                try_begin_auto_sync("workspace", &workspace_name, &peer_name, "watcher")
-            };
-            let Some(gate_key) = gate_key else {
-                if let Some(fingerprint) = fingerprint {
-                    last_fingerprint = Some(fingerprint);
-                }
-                continue;
-            };
-            if bypass_pending {
-                clear_workspace_first_propagation(&workspace_name, &peer_name);
-            }
-            match run_workspace_auto_sync_outcome(&config_path, &config, &workspace, None) {
-                Ok(outcome) => {
-                    let post_config = load_config(&config_path).unwrap_or_else(|_| config.clone());
-                    if let Some(updated_workspace) = post_config
-                        .workspaces
-                        .iter()
-                        .find(|workspace| workspace.name == workspace_name)
-                    {
-                        if let Some(post_fingerprint) =
-                            workspace_auto_sync_fingerprint(&post_config, updated_workspace)
-                        {
-                            app_log(
-                                "baseline_updated",
-                                &[
-                                    ("scope", "workspace".to_string()),
-                                    ("name", workspace_name.clone()),
-                                    ("peer", peer_name.clone()),
-                                    ("trigger", "watcher".to_string()),
-                                    ("hash", hash_prefix(&post_fingerprint)),
-                                ],
-                            );
-                            last_fingerprint = Some(post_fingerprint);
-                        }
-                    }
-                    let files = (outcome.report.code_files_transferred
-                        + outcome.report.session_files_transferred)
-                        as u32;
-                    record_auto_sync_history(
-                        &config_path,
-                        &workspace_name,
-                        true,
-                        files,
-                        None,
-                        Some(&workspace_name),
-                        None,
-                        "mixed",
-                    );
-                    record_auto_workspace_child_history(
-                        &config_path,
-                        &outcome.workspace,
-                        true,
-                        None,
-                        "mixed",
-                        Some(&outcome.child_file_counts),
-                    );
-                    app_log(
-                        "workspace_auto_sync_complete",
-                        &[
-                            ("workspace", workspace_name.clone()),
-                            ("file_count", files.to_string()),
-                        ],
-                    );
-                }
-                Err(error) => {
-                    let detail = error.to_string();
-                    record_auto_sync_history(
-                        &config_path,
-                        &workspace_name,
-                        false,
-                        0,
-                        Some(detail.clone()),
-                        Some(&workspace_name),
-                        None,
-                        "mixed",
-                    );
-                    record_auto_workspace_child_history(
-                        &config_path,
-                        &workspace,
-                        false,
-                        Some(&detail),
-                        "mixed",
-                        None,
-                    );
-                    app_log(
-                        "workspace_auto_sync_failed",
-                        &[
-                            ("workspace", workspace_name.clone()),
-                            ("error", error.to_string()),
-                        ],
-                    );
-                }
-            }
-            finish_auto_sync(&gate_key);
-            suppress_until = Some(Instant::now() + auto_sync_cooldown());
-        }
-    });
-
-    app_log(
-        "workspace_watch_started",
-        &[
-            ("workspace", workspace.name.clone()),
-            ("local_root", local_root.display().to_string()),
-            ("path_count", paths.len().to_string()),
-        ],
-    );
-    Some(watcher)
 }
 
 fn replace_workspace(config: &mut SyncConfig, workspace: WorkspaceConfig) {
@@ -3072,9 +2575,12 @@ mod tests {
         });
         let backend = Backend::with_config(config, tmp.path().join("config.toml")).unwrap();
 
+        // No watcher machinery exists at all (the fields were removed with
+        // auto-sync); construction simply loads the config and starts nothing
+        // in the background. The workspace is present and untouched.
         let inner = backend.inner.lock().unwrap();
-        assert!(inner.workspace_watchers.is_empty());
-        assert!(inner.project_watchers.is_empty());
+        assert_eq!(inner.config.workspaces.len(), 1);
+        assert_eq!(inner.config.workspaces[0].name, "workspace");
     }
 
     #[test]

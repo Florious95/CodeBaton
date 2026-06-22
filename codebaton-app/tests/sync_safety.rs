@@ -416,67 +416,6 @@ fn auto_061_team_runtime_excluded() {
 
 // ── Suite E：watcher / 自动同步（双向模式，短 cooldown）──────────────
 
-/// AUTO-041 incoming_receive 防回环：A 推送变更到 B，B watcher 观察到接收端写入，
-/// 不得反向自动推回 A（接收端写入被 incoming_receive 抑制，不无限回环）。
-///
-/// 设计要点（根因排查后修正）：A 改文件 → A 自身 watcher 合法地把变更自动推到 B
-/// （这是**正向**自动同步，非回环）。B 收到写入后其 watcher 必须**被 incoming_receive
-/// 抑制**，不反向推回 A。验证：B 方向出现 auto_sync_suppressed(reason=incoming_receive)，
-/// 内容收敛且不发散（无 runaway 回环）。
-#[test]
-fn auto_041_incoming_receive_no_reverse_loop() {
-    let h = TwoBackend::builder()
-        .project_name("e041")
-        .a_file("README.md", "v1\n")
-        .bidirectional()
-        .build();
-
-    // 建立初始同步并让两端 watcher 充分 settle。
-    h.push(false).expect("初始 A→B 推送");
-    h.wait_watcher();
-    h.wait_watcher();
-    let base_suppress = h.event_count_for_project("auto_sync_suppressed");
-
-    // A 改文件：A 自身 watcher 会合法地自动推到 B（正向）。B 收到后不得反向回推。
-    h.write_a("README.md", "v2-from-A\n");
-    h.wait_watcher(); // A 正向自动同步 → B
-    h.wait_watcher(); // B 接收端 watcher 决策（应被 incoming 抑制）
-
-    // 关键：B 方向至少出现一次 incoming_receive 抑制，证明回环被主动拦住。
-    assert!(
-        h.event_count_for_project("auto_sync_suppressed") - base_suppress >= 1,
-        "B 接收端写入应触发 incoming_receive 抑制（防回环）"
-    );
-    // 内容收敛一致，无发散。
-    assert_file_content(&h.a_dir().join("README.md"), "v2-from-A\n").unwrap();
-    assert_file_content(&h.b_dir().join("README.md"), "v2-from-A\n").unwrap();
-}
-
-/// AUTO-040 内容不变（mtime/同内容重写）不得触发虚空自动同步。
-/// 双向自动 + 已同步后，重写同内容文件 → 指纹不变 → 指纹门拦截，不产生 auto_sync_complete。
-#[test]
-fn auto_040_no_void_sync_on_unchanged_content() {
-    let h = TwoBackend::builder()
-        .project_name("e040")
-        .a_file("README.md", "stable\n")
-        .two_way()
-        .synced()
-        .build();
-
-    let before = h.event_count_for_project("project_auto_sync_complete");
-    // 同内容重写：FS 事件触发，但内容指纹不变。
-    h.rewrite_a_same("README.md", "stable\n");
-    h.wait_watcher();
-
-    let after = h.event_count_for_project("project_auto_sync_complete");
-    assert_eq!(after, before, "内容不变不应触发自动同步（虚空同步）");
-    // 指纹门应命中过（说明 watcher 确实处理了事件，只是被拦）。
-    assert!(
-        h.event_count_for_project("sync_fingerprint_gate_hit") >= 1,
-        "应观测到指纹门拦截，证明 watcher 处理了事件"
-    );
-}
-
 // ── Suite B：故障/边界（reviewer 新增）─────────────────────────────
 
 /// AUTO-018C 子场景1：文件变目录。B 的 foo 是文件，A 的 foo/ 是目录 → 同步后
@@ -692,29 +631,6 @@ fn auto_031_workspace_new_chat_only_child() {
         h.b_has_session_marker("marker-new-child-chat-only"),
         "B 应能检索到新子目录的会话 marker"
     );
-}
-
-/// AUTO-042 衍生：内容真变化时自动同步**应**触发（双向 watcher 正向路径）。
-/// 验证 watcher 自动同步链路本身可用（与 040 互为正负对照）。
-#[test]
-fn auto_042_real_change_triggers_auto_sync() {
-    let h = TwoBackend::builder()
-        .project_name("e042")
-        .a_file("README.md", "v1\n")
-        .two_way()
-        .synced()
-        .build();
-
-    let before = h.event_count_for_project("project_auto_sync_complete");
-    h.write_a("README.md", "v2-changed\n");
-    h.wait_watcher();
-
-    assert!(
-        h.event_count_for_project("project_auto_sync_complete") > before,
-        "内容变化应触发自动同步"
-    );
-    // 自动同步后 B 应拿到新内容。
-    assert_file_content(&h.b_dir().join("README.md"), "v2-changed\n").unwrap();
 }
 
 // ── Suite H/I：性能、资源、路径边界（用现有 harness 可覆盖部分）──────
