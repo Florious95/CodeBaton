@@ -7,6 +7,10 @@
 
 use codebaton_sync::{ProjectConfig, SyncConfig, WorkspaceConfig};
 
+// Kept (per reviewer correction 2) for the workspace handoff-preview manifest,
+// mirroring `project_exclude_rules`. The project preview already consumes its
+// counterpart; the workspace preview path will use this — retained deliberately.
+#[allow(dead_code)]
 pub(crate) fn workspace_exclude_rules(config: &SyncConfig, workspace: &WorkspaceConfig) -> Vec<String> {
     let mut rules = codebaton_sync::default_exclude_rules();
     rules.extend(config.exclude_rules.clone());

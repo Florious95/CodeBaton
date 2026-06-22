@@ -11,14 +11,13 @@
 //! cwd, Codex copies as-is — this layer only unifies the call surface.
 
 use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use codebaton_core::{ProjectMapping, Result};
 use codebaton_sync::SyncConfig;
 
 use super::{
-    local_claude_projects_dir, local_codex_sessions_dir, prepare_claude_session_sync,
-    prepare_claude_workspace_session_sync, prepare_codex_session_sync,
+    prepare_claude_session_sync, prepare_claude_workspace_session_sync, prepare_codex_session_sync,
     prepare_codex_workspace_session_sync, SessionSyncPlan, WorkspaceSessionSyncPlan,
 };
 
@@ -38,15 +37,6 @@ impl AiToolKind {
         match self {
             AiToolKind::Claude => "claude",
             AiToolKind::Codex => "codex",
-        }
-    }
-
-    /// Local conversation directory for this tool, if it exists on this machine.
-    /// Used to detect which tools are "configured" (present) for handoff.
-    pub(crate) fn local_sessions_dir(self, project: &ProjectMapping) -> Option<PathBuf> {
-        match self {
-            AiToolKind::Claude => local_claude_projects_dir(&project.local_session_dir),
-            AiToolKind::Codex => local_codex_sessions_dir(),
         }
     }
 

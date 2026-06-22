@@ -286,31 +286,10 @@ fn scenario_11_sensitive_files_are_excluded() {
     assert!(!env.b_code.join("target/debug/app").exists());
 }
 
-#[test]
-fn scenario_12_two_way_auto_sync_pushes_then_pulls() {
-    let env = TestEnv::new("auto");
-    fs::write(env.a_code.join("state.txt"), "from-a").unwrap();
-    let mut coordinator = env.coordinator_with_no_sessions();
-
-    let pushed = coordinator
-        .run_auto_sync_once(&env.peer.id, &env.project(), true, false)
-        .unwrap();
-    assert!(matches!(pushed, codebaton_sync::AutoSyncOutcome::Synced(_)));
-    assert_eq!(
-        fs::read_to_string(env.b_code.join("state.txt")).unwrap(),
-        "from-a"
-    );
-
-    fs::write(env.b_code.join("state.txt"), "from-b").unwrap();
-    let pulled = coordinator
-        .run_auto_sync_once(&env.peer.id, &env.project(), false, true)
-        .unwrap();
-    assert!(matches!(pulled, codebaton_sync::AutoSyncOutcome::Synced(_)));
-    assert_eq!(
-        fs::read_to_string(env.a_code.join("state.txt")).unwrap(),
-        "from-b"
-    );
-}
+// scenario_12_two_way_auto_sync_pushes_then_pulls: 已删除。
+// 它验证 run_auto_sync_once 的「双向自动同步 + 拉取」流程，手动交接模型已废弃
+// 自动同步与 pull（仅 push）。run_auto_sync_once / AutoSyncOutcome 仍是 sync crate
+// 的库级 API（app 不再调用），未在本次 app 转向范围内删除——留作后续库清理。
 
 #[derive(Clone)]
 struct TestEnv {
