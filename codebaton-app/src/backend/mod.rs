@@ -86,11 +86,13 @@ mod session_stage;
 use self::session_stage::{
     claude_project_dir_name, count_files_recursive, increment_child_file_count,
     prepare_claude_session_sync, prepare_claude_workspace_session_sync, prepare_codex_session_sync,
-    prepare_codex_workspace_session_sync,
+    prepare_codex_workspace_session_sync, SessionSyncPlan, WorkspaceSessionSyncPlan,
 };
 // Used only by the in-file `mod tests` (via `use super::*`).
 #[cfg(test)]
 use self::session_stage::project_rewriter;
+mod ai_tools;
+use self::ai_tools::AiToolKind;
 
 mod sync_push;
 use self::sync_push::run_workspace_tcp_push;

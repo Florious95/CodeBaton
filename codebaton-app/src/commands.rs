@@ -1436,7 +1436,7 @@ pub fn preview_handoff(
             .sessions
             .into_iter()
             .map(|s| HandoffSessionGroupDto {
-                tool: s.tool.to_string(),
+                tool: s.tool,
                 file_count: s.file_count as u32,
                 bytes: s.bytes,
             })

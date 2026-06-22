@@ -7,11 +7,7 @@ use codebaton_discovery::PeerConnectionInfo;
 use codebaton_sync::{load_config, save_config, SyncConfig, SyncReport, WorkspaceConfig};
 use codebaton_transport::{generate_tls_identity, TcpTransporter, TlsConfig};
 
-use super::{app_log, peer_transport_connection};
-use super::{
-    prepare_claude_session_sync, prepare_claude_workspace_session_sync, prepare_codex_session_sync,
-    prepare_codex_workspace_session_sync,
-};
+use super::{app_log, peer_transport_connection, AiToolKind};
 use super::{child_manifest, manifest_fingerprint};
 use super::{count_files_recursive, increment_child_file_count, WorkspaceSyncOutcome};
 use super::{refresh_workspace_children, workspace_project_mapping};
@@ -37,11 +33,10 @@ pub(crate) fn run_tcp_push(
     let source = project.local_code_dir.clone();
     let remote_code_dir = project.remote_code_dir.clone();
     let mut session_plans = Vec::new();
-    if let Some(plan) = prepare_claude_session_sync(config_path, config, peer_name, project)? {
-        session_plans.push(("claude", plan));
-    }
-    if let Some(plan) = prepare_codex_session_sync(config_path, peer_name, project)? {
-        session_plans.push(("codex", plan));
+    for tool in AiToolKind::all() {
+        if let Some(plan) = tool.prepare_project(config_path, config, peer_name, project)? {
+            session_plans.push((tool.name(), plan));
+        }
     }
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
@@ -324,19 +319,12 @@ pub(crate) fn run_workspace_tcp_push(
     let project = workspace_project_mapping(config, &workspace, peer_name, &remote_root)?;
     let no_conflicts: HashSet<String> = HashSet::new();
     let mut session_plans = Vec::new();
-    if let Some(plan) = prepare_claude_workspace_session_sync(
-        config_path,
-        config,
-        peer_name,
-        &project,
-        &no_conflicts,
-    )? {
-        session_plans.push(plan);
-    }
-    if let Some(plan) =
-        prepare_codex_workspace_session_sync(config_path, peer_name, &project, &no_conflicts)?
-    {
-        session_plans.push(plan);
+    for tool in AiToolKind::all() {
+        if let Some(plan) =
+            tool.prepare_workspace(config_path, config, peer_name, &project, &no_conflicts)?
+        {
+            session_plans.push(plan);
+        }
     }
 
     let session_file_counts = runtime.block_on(async {

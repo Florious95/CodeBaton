@@ -14,7 +14,7 @@ use codebaton_core::Result;
 use codebaton_transport::scan_manifest_with_patterns;
 
 use super::exclude::project_exclude_rules;
-use super::{count_files_recursive, prepare_claude_session_sync, prepare_codex_session_sync};
+use super::{count_files_recursive, AiToolKind};
 
 /// One file that will be carried in the handoff.
 pub struct PreviewFile {
@@ -24,7 +24,7 @@ pub struct PreviewFile {
 
 /// A conversation-file group for one AI tool.
 pub struct PreviewSessionGroup {
-    pub tool: &'static str,
+    pub tool: String,
     pub file_count: usize,
     pub bytes: u64,
 }
@@ -70,29 +70,19 @@ impl super::Backend {
             }
         }
 
-        // ── Session files: stage (temp), measure, then clean up ──────────
+        // ── Session files: every AI tool, staged (temp), measured, cleaned ─
         let mut sessions = Vec::new();
-        if let Some(plan) =
-            prepare_claude_session_sync(&config_path, &config, peer_name, &project)?
-        {
-            let file_count = count_files_recursive(&plan.staged_project_dir);
-            total_size += plan.bytes;
-            sessions.push(PreviewSessionGroup {
-                tool: "claude",
-                file_count,
-                bytes: plan.bytes,
-            });
-            cleanup_staging(&plan.staging_root);
-        }
-        if let Some(plan) = prepare_codex_session_sync(&config_path, peer_name, &project)? {
-            let file_count = count_files_recursive(&plan.staged_project_dir);
-            total_size += plan.bytes;
-            sessions.push(PreviewSessionGroup {
-                tool: "codex",
-                file_count,
-                bytes: plan.bytes,
-            });
-            cleanup_staging(&plan.staging_root);
+        for tool in AiToolKind::all() {
+            if let Some(plan) = tool.prepare_project(&config_path, &config, peer_name, &project)? {
+                let file_count = count_files_recursive(&plan.staged_project_dir);
+                total_size += plan.bytes;
+                sessions.push(PreviewSessionGroup {
+                    tool: tool.name().to_string(),
+                    file_count,
+                    bytes: plan.bytes,
+                });
+                cleanup_staging(&plan.staging_root);
+            }
         }
 
         Ok(HandoffPreview {
