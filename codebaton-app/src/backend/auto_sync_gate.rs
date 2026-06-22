@@ -5,12 +5,10 @@
 //! never held across work. These are NOT Inner fields. Gate fns call
 //! `super::app_log` for structured logging.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
-
-use codebaton_sync::WorkspaceConfig;
 
 use super::app_log;
 
@@ -35,7 +33,6 @@ pub fn set_auto_sync_cooldown_for_test(d: Duration) {
 static INCOMING_SYNC_SUPPRESSIONS: OnceLock<Mutex<HashMap<PathBuf, Instant>>> = OnceLock::new();
 static AUTO_SYNC_GATES: OnceLock<Mutex<HashMap<String, AutoSyncGate>>> = OnceLock::new();
 static SESSION_BASELINE_SEEDS: OnceLock<Mutex<HashMap<String, SessionBaseline>>> = OnceLock::new();
-static WORKSPACE_PROPAGATION_BYPASS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 
 #[derive(Clone, Copy)]
 pub(crate) struct AutoSyncGate {
@@ -62,10 +59,6 @@ pub(crate) fn session_baseline_seeds() -> &'static Mutex<HashMap<String, Session
     SESSION_BASELINE_SEEDS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-pub(crate) fn workspace_propagation_bypass() -> &'static Mutex<HashSet<String>> {
-    WORKSPACE_PROPAGATION_BYPASS.get_or_init(|| Mutex::new(HashSet::new()))
-}
-
 /// incoming 防回环抑制窗口：必须 >= watcher debounce，否则接收端写入触发的 watcher
 /// 事件在抑制过期后才到达 → 误判为本地变更而反向回推（回环）。取 cooldown 与一个
 /// debounce 安全下限的较大者，使其既不被测试的短 cooldown 削穿，也随生产 cooldown 放大。
@@ -79,15 +72,6 @@ pub(crate) fn mark_incoming_sync_root(root: &Path) {
         .lock()
         .unwrap()
         .insert(root.to_path_buf(), Instant::now() + incoming_suppress_window());
-}
-
-pub(crate) fn incoming_sync_recent(root: &Path) -> bool {
-    let now = Instant::now();
-    let mut guard = incoming_sync_suppressions().lock().unwrap();
-    guard.retain(|_, until| *until > now);
-    guard
-        .keys()
-        .any(|incoming| incoming.starts_with(root) || root.starts_with(incoming))
 }
 
 pub(crate) fn auto_sync_gate_key(scope: &str, name: &str, peer: &str) -> String {
@@ -132,39 +116,6 @@ pub(crate) fn try_begin_auto_sync(
     Some(key)
 }
 
-pub(crate) fn begin_auto_sync_bypass_cooldown(
-    scope: &str,
-    name: &str,
-    peer: &str,
-    trigger: &str,
-) -> Option<String> {
-    let key = auto_sync_gate_key(scope, name, peer);
-    let now = Instant::now();
-    let mut gates = auto_sync_gates().lock().unwrap();
-    gates.retain(|_, gate| gate.in_flight || gate.cooldown_until > now);
-    if gates.get(&key).map(|gate| gate.in_flight).unwrap_or(false) {
-        app_log(
-            "auto_sync_suppressed",
-            &[
-                ("scope", scope.to_string()),
-                ("name", name.to_string()),
-                ("peer", peer.to_string()),
-                ("trigger", trigger.to_string()),
-                ("reason", "in_flight".to_string()),
-            ],
-        );
-        return None;
-    }
-    gates.insert(
-        key.clone(),
-        AutoSyncGate {
-            in_flight: true,
-            cooldown_until: now,
-        },
-    );
-    Some(key)
-}
-
 pub(crate) fn finish_auto_sync(gate_key: &str) {
     auto_sync_gates().lock().unwrap().insert(
         gate_key.to_string(),
@@ -175,33 +126,3 @@ pub(crate) fn finish_auto_sync(gate_key: &str) {
     );
 }
 
-pub(crate) fn enqueue_workspace_first_propagation(workspace: &WorkspaceConfig) {
-    let Some(peer) = workspace.effective_peer() else {
-        return;
-    };
-    workspace_propagation_bypass()
-        .lock()
-        .unwrap()
-        .insert(auto_sync_gate_key("workspace", &workspace.name, peer));
-    app_log(
-        "workspace_first_propagation_queued",
-        &[
-            ("workspace", workspace.name.clone()),
-            ("peer", peer.to_string()),
-        ],
-    );
-}
-
-pub(crate) fn workspace_first_propagation_pending(workspace_name: &str, peer_name: &str) -> bool {
-    workspace_propagation_bypass()
-        .lock()
-        .unwrap()
-        .contains(&auto_sync_gate_key("workspace", workspace_name, peer_name))
-}
-
-pub(crate) fn clear_workspace_first_propagation(workspace_name: &str, peer_name: &str) {
-    workspace_propagation_bypass()
-        .lock()
-        .unwrap()
-        .remove(&auto_sync_gate_key("workspace", workspace_name, peer_name));
-}

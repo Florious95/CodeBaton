@@ -1,7 +1,6 @@
 //! Auto-sync orchestration: fingerprint computation for change detection and the
-//! behavior-sensitive auto-sync drivers (`run_project_auto_sync`,
-//! `run_workspace_auto_sync_outcome`). Extracted from `mod.rs`; pinned by
-//! AUTO-* / CLI-SS-* tests.
+//! behavior-sensitive workspace sync driver (`run_workspace_auto_sync_outcome`).
+//! Extracted from `mod.rs`; pinned by AUTO-* / CLI-SS-* tests.
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -15,7 +14,7 @@ use super::SessionMtimeTarget;
 use super::{
     app_log, claude_mtime_paths, codex_session_file_matches_project,
     codex_session_file_matches_workspace, hash_codex_sessions_matching, hash_tree_contents,
-    replace_workspace, run_tcp_push, run_workspace_tcp_push,
+    replace_workspace, run_workspace_tcp_push,
 };
 
 pub(crate) struct WorkspaceSyncOutcome {
@@ -26,24 +25,6 @@ pub(crate) struct WorkspaceSyncOutcome {
 
 pub(crate) fn hash_prefix(fingerprint: &str) -> String {
     fingerprint.chars().take(8).collect()
-}
-
-pub(crate) fn project_auto_sync_fingerprint(
-    config: &SyncConfig,
-    project_name: &str,
-    peer_name: &str,
-) -> Option<String> {
-    let project = config.projects.iter().find(|project| {
-        project.name == project_name && project.peers.contains_key(peer_name) && project.enabled
-    })?;
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(b"project");
-    hasher.update(project.name.as_bytes());
-    hash_tree_contents(&mut hasher, "code", &project.local, 8192);
-    for path in claude_mtime_paths(config, std::slice::from_ref(&project.local)) {
-        hash_tree_contents(&mut hasher, "claude", &path, 2048);
-    }
-    Some(hasher.finalize().to_hex().to_string())
 }
 
 pub(crate) fn workspace_local_session_roots(workspace: &WorkspaceConfig) -> Vec<PathBuf> {
@@ -150,18 +131,6 @@ pub(crate) fn workspace_sync_fingerprint_for_target(
         });
     }
     Some(hasher.finalize().to_hex().to_string())
-}
-
-pub(crate) fn run_project_auto_sync(
-    config_path: &Path,
-    config: &SyncConfig,
-    project_name: &str,
-    peer_name: &str,
-    live_connection: Option<PeerConnectionInfo>,
-) -> Result<SyncReport> {
-    let project = config.project_mapping(project_name, peer_name)?;
-    // 自动同步绝不静默覆盖：confirm_overwrite=false，由 50% 安全阀 + 回收站兜底。
-    run_tcp_push(config_path, config, peer_name, &project, live_connection, false)
 }
 
 pub(crate) fn run_workspace_auto_sync_outcome(

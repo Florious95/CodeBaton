@@ -6,7 +6,7 @@
 //!   restore, and the in-memory snapshot sync-back — it drops only at fn end.
 //! - `run_workspace_sync` uses a scoped block that drops the guard before the
 //!   network push.
-//! - `probe_target_status` explicitly drops the guard before its network call.
+//! - `probe_peer_target` explicitly drops the guard before its network call.
 
 use codebaton_core::{AisyncError, Direction, Result};
 use codebaton_sync::{load_config, save_config, SyncConfig, SyncReport, WorkspaceConfig};
@@ -168,7 +168,7 @@ impl Backend {
 
     /// 连到对端、查询本项目 remote_code_dir 的状态（是否非空 + 当前 manifest 指纹）。
     /// 一次往返同时服务覆盖检测与脑裂检测。对端离线/连接失败时返回 Err。
-    fn probe_target_status(
+    fn probe_peer_target(
         &self,
         project_name: &str,
         peer_name: &str,
@@ -216,7 +216,7 @@ impl Backend {
     /// 推送前覆盖检测（初始场景：从未同步过）：对端目标目录是否已有文件。
     /// 出错时（对端离线/连接失败）返回 false（视为空，不阻断推送），但记日志。
     pub fn check_target_not_empty(&self, project_name: &str, peer_name: &str) -> Result<bool> {
-        match self.probe_target_status(project_name, peer_name) {
+        match self.probe_peer_target(project_name, peer_name) {
             Ok(resp) => {
                 app_log(
                     "check_target_not_empty",
@@ -242,119 +242,6 @@ impl Backend {
             }
         }
     }
-
-    /// 推送前脑裂检测：比对对端当前 manifest 指纹 vs 本端存的 peer_last_known_hash。
-    /// 返回前端弹窗所需的最小状态，不含文件级 diff。
-    pub fn check_split_brain(&self, project_name: &str, peer_name: &str) -> SplitBrainStatus {
-        let snapshot = {
-            let g = self.inner.lock().unwrap();
-            g.config.sync_snapshot(project_name, peer_name)
-        };
-
-        let resp = match self.probe_target_status(project_name, peer_name) {
-            Ok(resp) => resp,
-            Err(error) => {
-                // 对端不可达：无法判定，交由调用方/前端处理（视作未知，不阻断也不误报脑裂）。
-                app_log(
-                    "check_split_brain_unreachable",
-                    &[
-                        ("project", project_name.to_string()),
-                        ("peer", peer_name.to_string()),
-                        ("error", error.to_string()),
-                    ],
-                );
-                return SplitBrainStatus {
-                    reachable: false,
-                    has_snapshot: snapshot.is_some(),
-                    peer_not_empty: false,
-                    split_brain: false,
-                };
-            }
-        };
-
-        let split_brain = match &snapshot {
-            // 有快照：对端当前指纹 != 上次已知指纹 => 对端有独立变化 => 脑裂。
-            Some(snap) => resp.manifest_hash != snap.peer_last_known_hash,
-            // 无快照：从未同步过，不算脑裂（由 not_empty 覆盖检测处理）。
-            None => false,
-        };
-
-        app_log(
-            "check_split_brain",
-            &[
-                ("project", project_name.to_string()),
-                ("peer", peer_name.to_string()),
-                ("has_snapshot", snapshot.is_some().to_string()),
-                ("peer_not_empty", resp.not_empty.to_string()),
-                ("split_brain", split_brain.to_string()),
-            ],
-        );
-
-        SplitBrainStatus {
-            reachable: true,
-            has_snapshot: snapshot.is_some(),
-            peer_not_empty: resp.not_empty,
-            split_brain,
-        }
-    }
-
-    /// 解决脑裂：按用户选择「以哪端为准」执行覆盖（被覆盖方先整目录备份）。
-    /// - `PreferLocal`：以本端覆盖对端 = 确认覆盖推送（对端先备份，快照更新）。
-    /// - `PreferRemote`：以对端覆盖本端，需反向同步（pull）——当前未实现，返回错误。
-    pub fn resolve_split_brain(
-        &self,
-        project_name: &str,
-        peer_name: &str,
-        resolution: SplitBrainResolution,
-    ) -> Result<SyncReport> {
-        match resolution {
-            SplitBrainResolution::PreferLocal => {
-                app_log(
-                    "resolve_split_brain_prefer_local",
-                    &[
-                        ("project", project_name.to_string()),
-                        ("peer", peer_name.to_string()),
-                    ],
-                );
-                // 以本端为准 = 确认覆盖推送：对端原状进 .bak-*，再用本端覆盖，快照更新。
-                self.run_sync(project_name, peer_name, Direction::LocalToRemote, &[], true)
-            }
-            SplitBrainResolution::PreferRemote => {
-                app_log(
-                    "resolve_split_brain_prefer_remote_unimplemented",
-                    &[
-                        ("project", project_name.to_string()),
-                        ("peer", peer_name.to_string()),
-                    ],
-                );
-                Err(AisyncError::Transport(
-                    "resolve split-brain prefer-remote requires reverse sync (pull), not yet implemented".to_string(),
-                ))
-            }
-        }
-    }
-}
-
-/// 脑裂解决方向：以本端 / 对端为准。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SplitBrainResolution {
-    /// 以本端为准，覆盖对端（对端先备份）。
-    PreferLocal,
-    /// 以对端为准，覆盖本端（本端先备份）。当前未实现（需反向同步）。
-    PreferRemote,
-}
-
-/// 推送前脑裂/覆盖检测结果，供前端决定弹哪种确认框。
-#[derive(Debug, Clone)]
-pub struct SplitBrainStatus {
-    /// 对端是否可达（不可达时其余字段无意义）。
-    pub reachable: bool,
-    /// 本端是否存有该 (项目, 对端) 的同步快照。
-    pub has_snapshot: bool,
-    /// 对端目标目录当前是否非空。
-    pub peer_not_empty: bool,
-    /// 是否检测到脑裂（有快照且对端当前指纹与上次已知不一致）。
-    pub split_brain: bool,
 }
 
 /// Temporarily add exact-path excludes to a project. Returns the previous

@@ -189,83 +189,6 @@ fn auto_018_backup_recoverable() {
     assert_backup_recoverable(&backup, &pre_hash).unwrap();
 }
 
-// ── Suite C：脑裂检测与解决 ──────────────────────────────────────────
-
-/// AUTO-020 后续同步检测对端独立修改（脑裂检测，独立探针）。
-#[test]
-fn auto_020_split_brain_detected() {
-    let h = TwoBackend::builder()
-        .a_file("README.md", "proj\n")
-        .a_file("keep.md", "keep\n")
-        .synced()
-        .build();
-
-    h.write_a("README.md", "changed by A\n");
-    h.write_b("keep.md", "changed by B\n");
-
-    assert_split_brain(&h.probe_split_brain()).unwrap();
-}
-
-/// AUTO-022 脑裂选择本端为准：覆盖 B、备份 B、快照更新。
-#[test]
-fn auto_022_resolve_prefer_local() {
-    let h = TwoBackend::builder()
-        .a_file("README.md", "proj\n")
-        .a_file("keep.md", "keep\n")
-        .synced()
-        .build();
-    h.write_a("README.md", "A wins\n");
-    h.write_b("keep.md", "B local change\n");
-
-    let report = h
-        .a
-        .resolve_split_brain(
-            "proj",
-            "B",
-            codebaton_app_lib::backend::SplitBrainResolution::PreferLocal,
-        )
-        .expect("prefer-local 解决应成功");
-    let _ = report;
-
-    // B 被 A 覆盖（内容一致），B 原状进 .bak-*。
-    assert_dir_tree_eq(h.a_dir(), h.b_dir()).unwrap();
-    assert_backup_exists(h.b_dir().parent().unwrap(), "proj").unwrap();
-    assert_snapshot_synced(h.a_snapshot()).unwrap();
-}
-
-/// AUTO-023 脑裂选择对端为准：当前未实现，应返回明确错误（不静默吞）。
-#[test]
-fn auto_023_resolve_prefer_remote_not_implemented() {
-    let h = TwoBackend::builder()
-        .a_file("README.md", "proj\n")
-        .synced()
-        .build();
-    let result = h.a.resolve_split_brain(
-        "proj",
-        "B",
-        codebaton_app_lib::backend::SplitBrainResolution::PreferRemote,
-    );
-    assert!(result.is_err(), "prefer-remote 未实现应返回错误");
-}
-
-/// AUTO-024 对端不可达时不得误判安全：停 B 守护后探针报 unreachable。
-#[test]
-fn auto_024_unreachable_not_treated_as_safe() {
-    let h = TwoBackend::builder()
-        .a_file("a.txt", "a\n")
-        .synced()
-        .build();
-    let a_hash_before = dir_hash_of(h.a_dir());
-
-    h.shutdown_b();
-    settle();
-
-    let status = h.probe_split_brain();
-    assert_unreachable(&status).unwrap();
-    // A 文件不变。
-    assert_eq!(dir_hash_of(h.a_dir()), a_hash_before);
-}
-
 // ── Suite B/G：exclude / 删除映射 ────────────────────────────────────
 
 /// AUTO-013 衍生 + §17：删除映射不删文件。
@@ -752,32 +675,6 @@ fn auto_016_trash_retention_purge() {
         })
         .unwrap_or(false);
     assert!(!stale_found, "8 天前的过期回收站批次应被清理");
-}
-
-/// AUTO-021 脑裂取消：检测到脑裂后不解决（取消）→ 两端文件均不变、快照不更新。
-#[test]
-fn auto_021_split_brain_cancel() {
-    let h = TwoBackend::builder()
-        .project_name("sb-cancel")
-        .a_file("README.md", "base\n")
-        .a_file("keep.md", "k\n")
-        .synced()
-        .build();
-    let snap_before = h.a_snapshot();
-
-    // 双向分叉 → 检测到脑裂。
-    h.write_a("README.md", "A 改\n");
-    h.write_b("keep.md", "B 改\n");
-    assert_split_brain(&h.probe_split_brain()).unwrap();
-
-    // 记录分叉后状态。取消（不 resolve、不推送）后两端应各自保持分叉内容。
-    let a_hash = dir_hash_of(h.a_dir());
-    let b_hash = dir_hash_of(h.b_dir());
-    assert_eq!(dir_hash_of(h.a_dir()), a_hash, "取消后 A 保持分叉内容");
-    assert_eq!(dir_hash_of(h.b_dir()), b_hash, "取消后 B 保持分叉内容");
-    assert_file_content(&h.a_dir().join("README.md"), "A 改\n").unwrap();
-    assert_file_content(&h.b_dir().join("keep.md"), "B 改\n").unwrap();
-    assert_snapshot_unchanged(&snap_before, &h.a_snapshot()).unwrap();
 }
 
 /// AUTO-076 后台线程收尾：harness drop 后 B 守护停止、端口可被重新 bind（无泄漏）。

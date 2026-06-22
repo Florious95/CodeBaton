@@ -11,7 +11,7 @@ use std::net::{SocketAddr, TcpListener};
 use std::path::{Path, PathBuf};
 use std::{fs, thread, time::Duration};
 
-use codebaton_app_lib::backend::{Backend, SplitBrainStatus};
+use codebaton_app_lib::backend::Backend;
 use codebaton_core::{Direction, OsType, Result};
 use codebaton_sync::{ClaudeConfig, DeviceConfig, SyncConfig, SyncModeConfig, SyncSnapshot};
 use codebaton_transport::{manifest_hash, scan_manifest};
@@ -533,12 +533,6 @@ impl TwoBackend {
         )
     }
 
-    /// 独立 split-brain 探针（需 B 守护在线）。注意 push 端本身无此守卫。
-    /// 返回真实 `SplitBrainStatus`（非 Result，不要加 `?`）。
-    pub fn probe_split_brain(&self) -> SplitBrainStatus {
-        self.a.check_split_brain(&self.project_name, &self.peer_name)
-    }
-
     pub fn write_a(&self, rel: &str, content: &str) {
         write_file(&self.a_project_local.join(rel), content).unwrap();
     }
@@ -861,32 +855,6 @@ pub fn assert_no_trash_in(dir: &Path) -> std::result::Result<(), String> {
     }
 }
 
-/// 独立 split-brain 探针断言。真实 `SplitBrainStatus`（backend.rs:2813）字段：
-/// reachable / has_snapshot / peer_not_empty / split_brain（共 4 个，非 Result）。
-pub fn assert_split_brain(status: &SplitBrainStatus) -> std::result::Result<(), String> {
-    if !status.reachable {
-        return Err("peer 不可达，无法判定 split-brain".into());
-    }
-    if !status.has_snapshot {
-        return Err("应有快照（split-brain 需先有同步历史）".into());
-    }
-    if !status.split_brain {
-        return Err("应检测到 split-brain 却没有".into());
-    }
-    Ok(())
-}
-
-pub fn assert_no_split_brain(status: &SplitBrainStatus) -> std::result::Result<(), String> {
-    if !status.reachable {
-        return Err("peer 不可达".into());
-    }
-    if status.split_brain {
-        Err("意外检测到 split-brain".into())
-    } else {
-        Ok(())
-    }
-}
-
 /// 安全阀 abort 断言：结果须 Err 且错误含 "safety valve"（transport 字面量）。
 pub fn assert_safety_valve_aborted(
     result: &Result<codebaton_sync::SyncReport>,
@@ -960,17 +928,6 @@ pub fn assert_backup_recoverable(
     pre_overwrite_hash: &str,
 ) -> std::result::Result<(), String> {
     assert_backup_matches(backup, pre_overwrite_hash)
-}
-
-/// 不可达断言（AUTO-024）：probe 不可达时不得当作「安全无脑裂」。
-pub fn assert_unreachable(status: &SplitBrainStatus) -> std::result::Result<(), String> {
-    if status.reachable {
-        Err("期望对端不可达，实际可达".into())
-    } else if status.split_brain {
-        Err("不可达却报 split_brain，逻辑错误".into())
-    } else {
-        Ok(())
-    }
 }
 
 /// 短暂等待（serve 守护接收完成后磁盘可见性的保险，通常不需要）。

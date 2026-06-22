@@ -1,7 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
 
 use codebaton_core::{AisyncError, Direction, Result};
 use codebaton_discovery::PeerConnectionInfo;
@@ -13,9 +12,9 @@ use super::{
     prepare_claude_session_sync, prepare_claude_workspace_session_sync, prepare_codex_session_sync,
     prepare_codex_workspace_session_sync,
 };
-use super::{analyze_workspace_conflicts, child_manifest, manifest_fingerprint};
+use super::{child_manifest, manifest_fingerprint};
 use super::{count_files_recursive, increment_child_file_count, WorkspaceSyncOutcome};
-use super::{refresh_workspace_children, workspace_project_mapping, WorkspaceConflictAnalysis};
+use super::{refresh_workspace_children, workspace_project_mapping};
 
 pub(crate) fn run_tcp_push(
     config_path: &Path,
@@ -255,126 +254,40 @@ pub(crate) fn run_workspace_tcp_push(
         .enable_all()
         .build()
         .map_err(|error| AisyncError::Transport(format!("tokio runtime: {error}")))?;
-    let analysis_slot: Arc<Mutex<Option<WorkspaceConflictAnalysis>>> = Arc::new(Mutex::new(None));
-    let preflight_workspace = workspace.clone();
-    let preflight_slot = Arc::clone(&analysis_slot);
-    let code_result = runtime.block_on(async {
+    // 一次性交接：直推所有 child，不做脑裂/冲突分析；传输层的「覆盖前备份」是安全网。
+    let source_manifest = runtime.block_on(async {
         let identity = generate_tls_identity("aisync-client")?;
         let tls = TlsConfig::new(identity, connection.server_name.clone())
             .with_pinned_peer_cert(connection.receiver_cert_der.clone());
         let mut transporter =
             TcpTransporter::connect_to_peer(&connection.peer, connection.endpoint.port(), &tls)
                 .await?;
-        let result = transporter
-            .sync_directory_to_checked(&source, Some(&remote_root), None, |source, remote| {
-                let analysis = analyze_workspace_conflicts(&preflight_workspace, source, remote);
-                let has_conflicts = !analysis.conflicted_children.is_empty();
-                *preflight_slot.lock().unwrap() = Some(analysis.clone());
-                if has_conflicts {
-                    return Err(AisyncError::ConflictDetected(
-                        codebaton_core::ConflictDetails {
-                            project_id: preflight_workspace.name.clone(),
-                            local_version: 0,
-                            remote_version: 0,
-                            summary: "workspace child changed on both devices".to_string(),
-                        },
-                    ));
-                }
-                Ok(())
-            })
+        let manifest = transporter
+            .sync_directory_to(&source, Some(&remote_root), None)
             .await;
         transporter.shutdown().await;
-        result
-    });
+        manifest
+    })?;
 
-    let (code_files, workspace, conflicted_children, mut child_file_counts) = match code_result {
-        Ok(exchange) => {
-            let analysis = analysis_slot.lock().unwrap().take().unwrap_or_else(|| {
-                analyze_workspace_conflicts(
-                    &workspace,
-                    &exchange.source_manifest,
-                    &exchange.remote_manifest,
-                )
-            });
-            let mut child_file_counts = HashMap::new();
-            for child in &analysis.workspace.children {
-                if !child.enabled || child.conflicted {
-                    continue;
-                }
-                let local = child_manifest(&exchange.source_manifest, &child.name);
-                let local_fingerprint = manifest_fingerprint(&local);
-                if previous_child_fingerprints.get(&child.name) != Some(&local_fingerprint) {
-                    increment_child_file_count(
-                        &mut child_file_counts,
-                        &child.name,
-                        local.files.len(),
-                    );
-                }
-            }
-            (
-                exchange.source_manifest.files.len(),
-                analysis.workspace,
-                Vec::new(),
-                child_file_counts,
-            )
+    let code_files = source_manifest.files.len();
+    let mut workspace = workspace;
+    let mut child_file_counts = HashMap::new();
+    for child in &mut workspace.children {
+        if !child.enabled {
+            continue;
         }
-        Err(error) => {
-            let Some(analysis) = analysis_slot.lock().unwrap().take() else {
-                return Err(error);
-            };
-            if analysis.conflicted_children.is_empty() {
-                return Err(error);
-            }
-            for child in &analysis.conflicted_children {
-                app_log(
-                    "workspace_child_conflict_detected",
-                    &[
-                        ("workspace", workspace.name.clone()),
-                        ("child", child.clone()),
-                        ("peer", peer_name.to_string()),
-                    ],
-                );
-            }
-            let (code_files, child_file_counts) = runtime.block_on(async {
-                let mut transferred = 0usize;
-                let mut child_file_counts = HashMap::new();
-                for child in &analysis.safe_children {
-                    let identity = generate_tls_identity("aisync-client")?;
-                    let tls = TlsConfig::new(identity, connection.server_name.clone())
-                        .with_pinned_peer_cert(connection.receiver_cert_der.clone());
-                    let mut transporter = TcpTransporter::connect_to_peer(
-                        &connection.peer,
-                        connection.endpoint.port(),
-                        &tls,
-                    )
-                    .await?;
-                    let manifest = transporter
-                        .sync_directory_to(&child.local_dir, Some(&child.remote_dir), None)
-                        .await?;
-                    transporter.shutdown().await;
-                    transferred += manifest.files.len();
-                    increment_child_file_count(
-                        &mut child_file_counts,
-                        &child.name,
-                        manifest.files.len(),
-                    );
-                }
-                Ok::<_, AisyncError>((transferred, child_file_counts))
-            })?;
-            (
-                code_files,
-                analysis.workspace,
-                analysis.conflicted_children,
-                child_file_counts,
-            )
+        let local = child_manifest(&source_manifest, &child.name);
+        let local_fingerprint = manifest_fingerprint(&local);
+        if previous_child_fingerprints.get(&child.name) != Some(&local_fingerprint) {
+            increment_child_file_count(&mut child_file_counts, &child.name, local.files.len());
         }
-    };
+        child.last_fingerprint = Some(local_fingerprint);
+    }
 
-    let conflicted: HashSet<String> = conflicted_children.iter().cloned().collect();
     let empty_children: Vec<_> = workspace
         .children
         .iter()
-        .filter(|child| child.enabled && !conflicted.contains(&child.name))
+        .filter(|child| child.enabled)
         .filter(|child| count_files_recursive(&child.local_dir) == 0)
         .cloned()
         .collect();
@@ -409,18 +322,19 @@ pub(crate) fn run_workspace_tcp_push(
     }
 
     let project = workspace_project_mapping(config, &workspace, peer_name, &remote_root)?;
+    let no_conflicts: HashSet<String> = HashSet::new();
     let mut session_plans = Vec::new();
     if let Some(plan) = prepare_claude_workspace_session_sync(
         config_path,
         config,
         peer_name,
         &project,
-        &conflicted,
+        &no_conflicts,
     )? {
         session_plans.push(plan);
     }
     if let Some(plan) =
-        prepare_codex_workspace_session_sync(config_path, peer_name, &project, &conflicted)?
+        prepare_codex_workspace_session_sync(config_path, peer_name, &project, &no_conflicts)?
     {
         session_plans.push(plan);
     }
@@ -484,7 +398,6 @@ pub(crate) fn run_workspace_tcp_push(
             ("remote_root", remote_root.display().to_string()),
             ("file_count", code_files.to_string()),
             ("session_files", session_files.to_string()),
-            ("conflicted_children", conflicted_children.len().to_string()),
         ],
     );
 

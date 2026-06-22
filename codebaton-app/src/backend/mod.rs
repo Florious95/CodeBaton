@@ -14,10 +14,10 @@ use std::fs;
 use std::io::{BufRead, BufReader, Read};
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{Arc, Mutex};
 #[cfg(test)]
 use std::sync::OnceLock;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, SystemTime};
 
 use codebaton_core::{
     AisyncError, DeviceId, DeviceInfo, Discoverer, OsType, Result,
@@ -54,9 +54,7 @@ use self::auto_sync_gate::*;
 pub use self::auto_sync_gate::set_auto_sync_cooldown_for_test;
 
 mod workspace_conflict;
-use self::workspace_conflict::{
-    analyze_workspace_conflicts, child_manifest, manifest_fingerprint, WorkspaceConflictAnalysis,
-};
+use self::workspace_conflict::{child_manifest, manifest_fingerprint};
 
 mod transport;
 use self::transport::{
@@ -70,21 +68,19 @@ use self::transport::{
 use self::transport::project_mapping_ack_connection;
 
 mod history;
-use self::history::{
-    append_json_line, read_jsonl, record_auto_sync_history, record_auto_workspace_child_history,
-};
+use self::history::{append_json_line, read_jsonl};
 #[cfg(test)]
-use self::history::record_receiver_sync_history;
+use self::history::{
+    record_auto_sync_history, record_auto_workspace_child_history, record_receiver_sync_history,
+};
 // Used only by the in-file `mod tests` (via `use super::*`).
 #[cfg(test)]
 use self::history::history_summary_from_config;
 
 mod auto_sync_orchestration;
-use self::auto_sync_orchestration::{
-    hash_prefix, project_auto_sync_fingerprint, run_project_auto_sync,
-    run_workspace_auto_sync_outcome, sync_fingerprint_for_target, workspace_auto_sync_fingerprint,
-    WorkspaceSyncOutcome,
-};
+use self::auto_sync_orchestration::{hash_prefix, sync_fingerprint_for_target, WorkspaceSyncOutcome};
+#[cfg(test)]
+use self::auto_sync_orchestration::workspace_auto_sync_fingerprint;
 
 mod session_stage;
 use self::session_stage::{
@@ -97,7 +93,7 @@ use self::session_stage::{
 use self::session_stage::project_rewriter;
 
 mod sync_push;
-use self::sync_push::{run_tcp_push, run_workspace_tcp_push};
+use self::sync_push::run_workspace_tcp_push;
 mod claude_paths;
 use self::claude_paths::*;
 mod exclude;
@@ -109,8 +105,6 @@ mod session_scanner;
 use self::session_scanner::{
     refresh_workspaces_in_config, session_mtime_targets, SessionMtimeTarget,
 };
-#[cfg(test)]
-use self::session_scanner::{classify_session_mtime, SessionMtimeDecision};
 mod file_transfer;
 use self::file_transfer::{safe_filename, FileReceiveState, OutboundFileTransfer};
 #[cfg(test)]
@@ -138,10 +132,9 @@ pub use self::serve::ServeInfo;
 // the 3 constructors.
 use self::serve::{start_serve_daemon, ServeShutdownHandle};
 mod split_brain;
-pub use self::split_brain::{SplitBrainResolution, SplitBrainStatus};
 use codebaton_sync::{
-    default_state_path, load_config, save_config, DiscoveredProject, FsWatcher,
-    ProjectConfig, SyncConfig, SyncModeConfig, WatchConfig, WorkspaceChildConfig,
+    default_state_path, load_config, save_config, DiscoveredProject,
+    ProjectConfig, SyncConfig, SyncModeConfig, WorkspaceChildConfig,
     WorkspaceConfig,
 };
 #[cfg(test)]
@@ -1192,20 +1185,6 @@ fn replace_workspace(config: &mut SyncConfig, workspace: WorkspaceConfig) {
     config.workspaces.push(workspace);
 }
 
-pub(crate) fn claude_watch_paths(config: &SyncConfig, code_roots: &[PathBuf]) -> Vec<PathBuf> {
-    let Some(projects_root) = local_claude_projects_root(config) else {
-        return Vec::new();
-    };
-    let mut paths = Vec::new();
-    for root in code_roots {
-        let encoded = projects_root.join(claude_project_dir_name(root));
-        if encoded.exists() {
-            paths.push(encoded);
-        }
-    }
-    paths
-}
-
 pub(crate) fn existing_unique_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
     let mut seen = HashSet::new();
     let mut unique = Vec::new();
@@ -1237,53 +1216,6 @@ pub(crate) fn session_sync_key(target: &SessionMtimeTarget) -> String {
 
 fn session_seed_key(config_path: &Path, target_key: &str) -> String {
     format!("{}:{target_key}", config_path.display())
-}
-
-pub(crate) fn baseline_session_target(
-    config_path: &Path,
-    config: &SyncConfig,
-    target: &SessionMtimeTarget,
-    mtime: SystemTime,
-    seen: &mut HashMap<String, SystemTime>,
-    content_seen: &mut HashMap<String, String>,
-    sync_seen: &mut HashMap<String, String>,
-    event: &str,
-) {
-    let key = session_target_key(target);
-    let sync_key = session_sync_key(target);
-    let seeded = session_baseline_seeds()
-        .lock()
-        .unwrap()
-        .remove(&session_seed_key(config_path, &key));
-    let baseline = seeded.unwrap_or_else(|| SessionBaseline {
-        mtime,
-        content_fingerprint: target_content_fingerprint(target),
-        sync_fingerprint: sync_fingerprint_for_target(config, target),
-    });
-    seen.insert(key.clone(), baseline.mtime);
-    if let Some(fingerprint) = baseline.content_fingerprint {
-        content_seen.insert(key.clone(), fingerprint);
-    }
-    let sync_hash = baseline
-        .sync_fingerprint
-        .as_ref()
-        .map(|hash| hash_prefix(hash));
-    if let Some(fingerprint) = baseline.sync_fingerprint {
-        sync_seen.insert(sync_key.clone(), fingerprint);
-    }
-    app_log(
-        event,
-        &[
-            ("target_key", key),
-            ("sync_key", sync_key),
-            ("scope", target.scope.to_string()),
-            ("name", target.name.clone()),
-            ("peer", target.peer.clone()),
-            ("tool", target.tool.to_string()),
-            ("path", target.path.display().to_string()),
-            ("hash", sync_hash.unwrap_or_default()),
-        ],
-    );
 }
 
 fn seed_session_baselines_for_workspace(
@@ -1324,110 +1256,6 @@ fn seed_session_baselines_for_workspace(
                 ("hash", sync_hash.unwrap_or_default()),
             ],
         );
-    }
-}
-
-pub(crate) fn run_pending_workspace_first_propagations(config_path: &Path, config: &SyncConfig) {
-    for workspace in &config.workspaces {
-        if !workspace.enabled {
-            continue;
-        }
-        let Some(peer_name) = workspace.effective_peer().map(str::to_string) else {
-            continue;
-        };
-        if !workspace_first_propagation_pending(&workspace.name, &peer_name) {
-            continue;
-        }
-        let Some(gate_key) =
-            begin_auto_sync_bypass_cooldown("workspace", &workspace.name, &peer_name, "new_child")
-        else {
-            continue;
-        };
-        clear_workspace_first_propagation(&workspace.name, &peer_name);
-        app_log(
-            "workspace_first_propagation_started",
-            &[
-                ("workspace", workspace.name.clone()),
-                ("peer", peer_name.clone()),
-                ("trigger", "new_child".to_string()),
-            ],
-        );
-        match run_workspace_auto_sync_outcome(config_path, config, workspace, None) {
-            Ok(outcome) => {
-                let files = (outcome.report.code_files_transferred
-                    + outcome.report.session_files_transferred) as u32;
-                record_auto_sync_history(
-                    config_path,
-                    &workspace.name,
-                    true,
-                    files,
-                    None,
-                    Some(&workspace.name),
-                    None,
-                    "mixed",
-                );
-                record_auto_workspace_child_history(
-                    config_path,
-                    &outcome.workspace,
-                    true,
-                    None,
-                    "mixed",
-                    Some(&outcome.child_file_counts),
-                );
-                let post_config = load_config(config_path).unwrap_or_else(|_| config.clone());
-                seed_session_baselines_for_workspace(
-                    config_path,
-                    &post_config,
-                    &workspace.name,
-                    &peer_name,
-                );
-                app_log(
-                    "workspace_first_propagation_complete",
-                    &[
-                        ("workspace", workspace.name.clone()),
-                        ("peer", peer_name.clone()),
-                        ("file_count", files.to_string()),
-                    ],
-                );
-            }
-            Err(error) => {
-                let detail = error.to_string();
-                record_auto_sync_history(
-                    config_path,
-                    &workspace.name,
-                    false,
-                    0,
-                    Some(detail.clone()),
-                    Some(&workspace.name),
-                    None,
-                    "mixed",
-                );
-                record_auto_workspace_child_history(
-                    config_path,
-                    workspace,
-                    false,
-                    Some(&detail),
-                    "mixed",
-                    None,
-                );
-                app_log(
-                    "workspace_first_propagation_failed",
-                    &[
-                        ("workspace", workspace.name.clone()),
-                        ("peer", peer_name.clone()),
-                        ("error", detail),
-                    ],
-                );
-            }
-        }
-        finish_auto_sync(&gate_key);
-    }
-}
-
-pub(crate) fn refresh_interval_secs(config: &SyncConfig) -> u64 {
-    match config.refresh_interval_secs {
-        0 => codebaton_sync::default_refresh_interval_secs(),
-        secs => secs,
     }
 }
 
@@ -2469,87 +2297,6 @@ mod tests {
             .contains_key(&request_id));
     }
 
-    #[test]
-    fn workspace_conflict_analysis_isolates_first_level_child() {
-        let tmp = tempfile::tempdir().unwrap();
-        let local_root = tmp.path().join("workspace");
-        let remote_root = tmp.path().join("remote");
-        fs::create_dir_all(&local_root).unwrap();
-        let base_a = SyncManifest {
-            files: vec![manifest_entry("main.rs", "base-a")],
-        };
-        let base_b = SyncManifest {
-            files: vec![manifest_entry("main.rs", "base-b")],
-        };
-        let workspace = WorkspaceConfig {
-            name: "workspace".to_string(),
-            local_root: local_root.clone(),
-            remote_root: remote_root.clone(),
-            peer: "peer".to_string(),
-            children: vec![
-                WorkspaceChildConfig {
-                    name: "app-a".to_string(),
-                    local_dir: local_root.join("app-a"),
-                    remote_dir: remote_root.join("app-a"),
-                    enabled: true,
-                    conflicted: false,
-                    last_fingerprint: Some(manifest_fingerprint(&base_a)),
-                },
-                WorkspaceChildConfig {
-                    name: "app-b".to_string(),
-                    local_dir: local_root.join("app-b"),
-                    remote_dir: remote_root.join("app-b"),
-                    enabled: true,
-                    conflicted: false,
-                    last_fingerprint: Some(manifest_fingerprint(&base_b)),
-                },
-            ],
-            local: local_root,
-            peers: HashMap::new(),
-            scan_depth: 1,
-            auto_enable_new: true,
-            sync_mode: SyncModeConfig::TwoWayAuto,
-            enabled: true,
-            exclude_rules: Vec::new(),
-        };
-        let source = SyncManifest {
-            files: vec![
-                manifest_entry("app-a/main.rs", "local-a"),
-                manifest_entry("app-b/main.rs", "local-b"),
-            ],
-        };
-        let remote = SyncManifest {
-            files: vec![
-                manifest_entry("app-a/main.rs", "remote-a"),
-                manifest_entry("app-b/main.rs", "base-b"),
-            ],
-        };
-
-        let analysis = analyze_workspace_conflicts(&workspace, &source, &remote);
-
-        assert_eq!(analysis.conflicted_children, vec!["app-a"]);
-        assert_eq!(analysis.safe_children.len(), 1);
-        assert_eq!(analysis.safe_children[0].name, "app-b");
-        let app_a = analysis
-            .workspace
-            .children
-            .iter()
-            .find(|child| child.name == "app-a")
-            .unwrap();
-        let app_b = analysis
-            .workspace
-            .children
-            .iter()
-            .find(|child| child.name == "app-b")
-            .unwrap();
-        assert!(app_a.conflicted);
-        assert!(!app_b.conflicted);
-        assert_eq!(
-            app_b.last_fingerprint.as_deref(),
-            Some(manifest_fingerprint(&child_manifest(&source, "app-b")).as_str())
-        );
-    }
-
     // Manual handoff: the backend must NOT start any background watchers for
     // existing workspaces — sync happens only on explicit user push.
     #[test]
@@ -2665,32 +2412,6 @@ mod tests {
         let history = fs::read_to_string(tmp.path().join("history.jsonl")).unwrap();
         assert!(history.contains("\"workspaceName\":\"workspace\""));
         assert!(history.contains("\"childName\":\"new-child\""));
-    }
-
-    #[test]
-    fn session_mtime_decision_triggers_new_target_after_initial_scan() {
-        let key = "project:empty:peer:claude:/session".to_string();
-        let mtime = std::time::UNIX_EPOCH + std::time::Duration::from_secs(10);
-        let mut seen = HashMap::new();
-
-        assert_eq!(
-            classify_session_mtime(&seen, &key, mtime, false),
-            SessionMtimeDecision::BaselineNew
-        );
-        assert_eq!(
-            classify_session_mtime(&seen, &key, mtime, true),
-            SessionMtimeDecision::TriggerNew
-        );
-
-        seen.insert(key.clone(), mtime);
-        assert_eq!(
-            classify_session_mtime(&seen, &key, mtime, true),
-            SessionMtimeDecision::Unchanged
-        );
-        assert_eq!(
-            classify_session_mtime(&seen, &key, mtime + std::time::Duration::from_secs(1), true,),
-            SessionMtimeDecision::TriggerModified
-        );
     }
 
     #[test]
