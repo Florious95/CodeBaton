@@ -102,7 +102,7 @@ export function OverviewPage() {
                           <button
                             onClick={() => {
                               setSelectedProjectId(c.name);
-                              ipc.startSync(c.name, "push").catch(() => {});
+                              ipc.startSync(c.name).catch(() => {});
                               setDialog({ kind: "syncProgress" });
                             }}
                           >

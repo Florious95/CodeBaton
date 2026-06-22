@@ -19,41 +19,29 @@ export function ProjectCard({ project }: { project: Project }) {
     }
   };
 
-  const startSyncNow = (direction: "push" | "pull", confirmOverwrite = false) => {
+  const startSyncNow = (confirmOverwrite = false) => {
     setSelectedProjectId(project.id);
-    ipc.startSync(project.id, direction, [], confirmOverwrite).catch(() => {});
+    ipc.startSync(project.id, [], confirmOverwrite).catch(() => {});
     setDialog({ kind: "syncProgress" });
   };
 
-  const sync = async (direction: "push" | "pull") => {
+  const sync = async () => {
     setSelectedProjectId(project.id);
-    // Pull is disabled in the UI; only push reaches here. Before pushing, probe
-    // the peer for split-brain / overwrite risk:
-    //   splitBrain               → ask which side wins (本端/对端/取消)
-    //   peerNotEmpty && !snapshot → confirm overwrite (peer originals backed up)
-    //   otherwise                → push directly
-    if (direction === "push") {
-      let probe;
-      try {
-        probe = await ipc.checkSplitBrain(project.id, project.peerName);
-      } catch (e) {
-        pushToast(`${t.overwriteCheckFailed}: ${e}`);
-        return;
-      }
-      if (!probe.reachable) {
-        pushToast(t.peerOfflineCantSync(project.peerName));
-        return;
-      }
-      if (probe.splitBrain) {
-        setDialog({ kind: "splitBrain", projectId: project.id, peerName: project.peerName });
-        return;
-      }
-      if (probe.peerNotEmpty && !probe.hasSnapshot) {
-        setDialog({ kind: "overwriteConfirm", projectId: project.id, peerName: project.peerName });
-        return;
-      }
+    // Manual handoff is push-only. Before pushing, check whether the peer's
+    // target dir is non-empty; if so, confirm overwrite (peer originals are
+    // backed up to <name>.bak-<timestamp> before the merge).
+    let notEmpty = false;
+    try {
+      notEmpty = await ipc.checkTargetNotEmpty(project.id, project.peerName);
+    } catch (e) {
+      pushToast(`${t.overwriteCheckFailed}: ${e}`);
+      return;
     }
-    startSyncNow(direction);
+    if (notEmpty) {
+      setDialog({ kind: "overwriteConfirm", projectId: project.id, peerName: project.peerName });
+      return;
+    }
+    startSyncNow();
   };
 
   return (
@@ -95,7 +83,7 @@ export function ProjectCard({ project }: { project: Project }) {
             <button onClick={() => ipc.cancelSync(project.id)}>{t.cancel}</button>
           ) : (
             <>
-              <button className="primary" onClick={() => sync("push")}>
+              <button className="primary" onClick={() => sync()}>
                 {t.push}
               </button>
               <button disabled title={t.pullDisabledHint}>{t.pull}</button>
@@ -146,7 +134,7 @@ export function ProjectCard({ project }: { project: Project }) {
           ))}
 
           <div className="btn-group" style={{ marginTop: 18 }}>
-            <button className="cta" onClick={() => sync("push")}>
+            <button className="cta" onClick={() => sync()}>
               {t.pushToHome} {project.peerName}
             </button>
             <button disabled title={t.pullDisabledHint}>

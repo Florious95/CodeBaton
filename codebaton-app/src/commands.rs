@@ -1412,38 +1412,16 @@ pub fn check_target_not_empty(
         .map_err(|e| e.to_string())
 }
 
-/// 推送前脑裂检测：返回前端弹窗所需的最小状态（不含文件级 diff）。
-/// 前端据此决定：split_brain=true → 弹「以哪端为准」；否则 peer_not_empty 走覆盖确认。
-#[tauri::command]
-pub fn check_split_brain(
-    backend: State<Backend>,
-    project_id: String,
-    peer_name: String,
-) -> std::result::Result<SplitBrainStatusDto, String> {
-    let status = backend.check_split_brain(&project_id, &peer_name);
-    Ok(SplitBrainStatusDto {
-        reachable: status.reachable,
-        has_snapshot: status.has_snapshot,
-        peer_not_empty: status.peer_not_empty,
-        split_brain: status.split_brain,
-    })
-}
-
-// ── Sync (push / pull) — real SyncCoordinator on a worker thread ─────
+// ── Sync (push only) — real SyncCoordinator on a worker thread ──────
 
 #[tauri::command]
 pub fn start_sync(
     app: AppHandle,
     project_id: String,
-    direction: String,
     confirmed_sensitive: Option<Vec<String>>,
     confirm_overwrite: Option<bool>,
 ) -> std::result::Result<(), String> {
-    let dir = if direction == "pull" {
-        Direction::RemoteToLocal
-    } else {
-        Direction::LocalToRemote
-    };
+    // Manual handoff is push-only (local → remote); pull is not supported.
     let confirmed = confirmed_sensitive.unwrap_or_default();
     // Overwrite confirmation: when the UI detected a non-empty peer target and the
     // user chose to proceed, this is true. Threaded into commit_staging so the
@@ -1475,7 +1453,7 @@ pub fn start_sync(
     let display = (project_id.clone(), peer_name.clone().unwrap_or_default());
 
     spawn_sync(
-        app, project_id, peer_name, dir, confirmed, display.0, display.1, confirm_overwrite,
+        app, project_id, peer_name, confirmed, display.0, display.1, confirm_overwrite,
     );
     Ok(())
 }
@@ -1486,17 +1464,14 @@ fn spawn_sync(
     app: AppHandle,
     project_id: String,
     peer_name: Option<String>,
-    direction: Direction,
     confirmed_sensitive: Vec<String>,
     project_name: String,
     peer_display: String,
     confirm_overwrite: bool,
 ) {
-    let dir_label = if matches!(direction, Direction::RemoteToLocal) {
-        format!("{} ← {}", project_name, peer_display)
-    } else {
-        format!("{} → {}", project_name, peer_display)
-    };
+    // Manual handoff is always a push (local → remote).
+    let direction = Direction::LocalToRemote;
+    let dir_label = format!("{} → {}", project_name, peer_display);
 
     thread::spawn(move || {
         let backend = app.state::<Backend>();
@@ -1530,11 +1505,7 @@ fn spawn_sync(
             })
             .map(|path| path.display().to_string())
             .unwrap_or_default();
-        let dir_str = if matches!(direction, Direction::RemoteToLocal) {
-            "pull"
-        } else {
-            "push"
-        };
+        let dir_str = "push";
         command_log(
             "sync_started",
             &[

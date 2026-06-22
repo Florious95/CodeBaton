@@ -17,20 +17,11 @@ export function useShortcuts() {
         setView({ page: "settings" });
         return;
       }
-      // Cmd/Ctrl + Shift + P → push current project
+      // Cmd/Ctrl + Shift + P → push (handoff) current project
       if (mod && e.shiftKey && (e.key === "P" || e.key === "p")) {
         e.preventDefault();
         if (onPage && selectedProjectId) {
-          ipc.startSync(selectedProjectId, "push").catch(() => {});
-          setDialog({ kind: "syncProgress" });
-        }
-        return;
-      }
-      // Cmd/Ctrl + Shift + L → pull current project
-      if (mod && e.shiftKey && (e.key === "L" || e.key === "l")) {
-        e.preventDefault();
-        if (onPage && selectedProjectId) {
-          ipc.startSync(selectedProjectId, "pull").catch(() => {});
+          ipc.startSync(selectedProjectId).catch(() => {});
           setDialog({ kind: "syncProgress" });
         }
         return;

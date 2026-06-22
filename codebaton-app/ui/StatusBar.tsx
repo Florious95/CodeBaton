@@ -20,7 +20,7 @@ export function StatusBar() {
 
       {statusBar.status === "idle" && (
         <span className="row" style={{ gap: 14 }}>
-          <span>{statusBar.autoSyncPaused ? t.pausedAuto : t.idle}</span>
+          <span>{t.idle}</span>
           {statusBar.lastSync && (
             <span className="faint">
               {t.lastSyncLabel}: {statusBar.lastSync}

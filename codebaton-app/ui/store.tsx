@@ -32,7 +32,6 @@ export type DialogState =
   | { kind: "unpair"; peerId: string }
   | { kind: "syncProgress" }
   | { kind: "overwriteConfirm"; projectId: string; peerName: string }
-  | { kind: "splitBrain"; projectId: string; peerName: string }
   | { kind: "rewriteReport"; projectId: string }
   | { kind: "discovered"; workspaceId: string }
   | { kind: "wizard" };

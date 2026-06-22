@@ -305,5 +305,4 @@ export interface StatusBar {
   syncingPercent: number | null;
   conflictProject: string | null;
   lastSync: string | null;
-  autoSyncPaused: boolean;
 }

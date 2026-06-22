@@ -776,7 +776,7 @@ function BatchDialog({ peerId, direction }: { peerId: string; direction: "push" 
                   .filter((k) => sensitiveOptIn[k] && k.startsWith(`${projectId}/`))
                   .map((k) => k.slice(projectId.length + 1));
               for (const item of chosen) {
-                await ipc.startSync(item.projectId, direction, confirmedFor(item.projectId)).catch(() => {});
+                await ipc.startSync(item.projectId, confirmedFor(item.projectId)).catch(() => {});
               }
               setDialog({ kind: "syncProgress" });
             }}
@@ -943,7 +943,7 @@ function OverwriteConfirmDialog({
             onClick={() => {
               ipc.uiLog("overwrite_confirmed action=proceed");
               setSelectedProjectId(projectId);
-              ipc.startSync(projectId, "push", [], true).catch(() => {});
+              ipc.startSync(projectId, [], true).catch(() => {});
               setDialog({ kind: "syncProgress" });
             }}
           >
@@ -953,61 +953,6 @@ function OverwriteConfirmDialog({
       }
     >
       <p style={{ lineHeight: 1.8 }}>{t.overwriteConfirmBody(peerName)}</p>
-    </Dialog>
-  );
-}
-
-// ── Split-brain (both sides changed) — which side wins? ──────────────
-function SplitBrainDialog({
-  projectId,
-  peerName,
-}: {
-  projectId: string;
-  peerName: string;
-}) {
-  const { setDialog, setSelectedProjectId, t } = useStore();
-  const cancel = () => {
-    ipc.uiLog("split_brain_resolved action=cancel");
-    setDialog(null);
-  };
-  return (
-    <Dialog
-      title={t.splitBrainTitle}
-      icon={<AlertTriangle size={18} color="var(--red)" />}
-      width={480}
-      closeOnOverlay={false}
-      onClose={cancel}
-      footer={
-        <>
-          <button onClick={cancel}>{t.cancel}</button>
-          <button
-            onClick={() => {
-              // Keep the peer = pull, which isn't implemented yet. Guide the
-              // user to push from the peer instead, and don't sync here.
-              ipc.uiLog("split_brain_resolved action=keep_remote");
-              pushToast(t.splitBrainKeepRemoteHint(peerName));
-              setDialog(null);
-            }}
-          >
-            {t.splitBrainKeepRemote}
-          </button>
-          <button
-            className="danger"
-            onClick={() => {
-              // Keep this device = normal push, overwriting the peer (its
-              // originals are backed up by the backend).
-              ipc.uiLog("split_brain_resolved action=keep_local");
-              setSelectedProjectId(projectId);
-              ipc.startSync(projectId, "push", [], true).catch(() => {});
-              setDialog({ kind: "syncProgress" });
-            }}
-          >
-            {t.splitBrainKeepLocal}
-          </button>
-        </>
-      }
-    >
-      <p style={{ lineHeight: 1.8 }}>{t.splitBrainBody(peerName)}</p>
     </Dialog>
   );
 }
@@ -1369,8 +1314,6 @@ export function DialogHost() {
       return <UnpairDialog peerId={dialog.peerId} />;
     case "overwriteConfirm":
       return <OverwriteConfirmDialog projectId={dialog.projectId} peerName={dialog.peerName} />;
-    case "splitBrain":
-      return <SplitBrainDialog projectId={dialog.projectId} peerName={dialog.peerName} />;
     case "syncProgress":
       return <SyncProgressDialog />;
     case "rewriteReport":
