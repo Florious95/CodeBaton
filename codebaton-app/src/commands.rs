@@ -11,6 +11,7 @@
 #[cfg(target_os = "macos")]
 use std::process::Command;
 use std::thread;
+use std::time::{Duration, Instant};
 
 use codebaton_core::Direction;
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -1553,6 +1554,59 @@ fn spawn_sync(
                 ("bytes", "0".to_string()),
             ],
         );
+        // Real-time progress: the transport fires this callback as bytes stream.
+        // Emit throttled `sync-progress` frames so the UI advances DURING the push
+        // (previously the only frames were the per-stage ones emitted AFTER it
+        // returned, so the bar appeared frozen for the whole transfer).
+        let last_emit: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
+        let progress_app = app.clone();
+        let pg_project_id = project_id.clone();
+        let pg_project_name = project_name.clone();
+        let pg_peer = peer_display.clone();
+        let pg_dir = dir_label.clone();
+        let on_progress = move |p: codebaton_transport::Progress| {
+            // Throttle to ~6 fps; always allow the final (bytes_done==total) frame.
+            let now = Instant::now();
+            let complete = p.total_bytes > 0 && p.bytes_done >= p.total_bytes;
+            {
+                let mut guard = last_emit.lock().unwrap();
+                if let Some(prev) = *guard {
+                    if !complete && now.duration_since(prev) < Duration::from_millis(160) {
+                        return;
+                    }
+                }
+                *guard = Some(now);
+            }
+            let percent = if p.total_bytes > 0 {
+                ((p.bytes_done.min(p.total_bytes) * 100) / p.total_bytes) as u8
+            } else {
+                0
+            };
+            let _ = progress_app.emit(
+                "sync-progress",
+                &SyncProgressDto {
+                    project_id: pg_project_id.clone(),
+                    project_name: pg_project_name.clone(),
+                    peer_name: pg_peer.clone(),
+                    direction: pg_dir.clone(),
+                    percent,
+                    phase: "transfer".to_string(),
+                    files_done: 0,
+                    files_total: 0,
+                    bytes_done: p.bytes_done,
+                    bytes_total: p.total_bytes,
+                    speed_bps: 0,
+                    eta_secs: 0,
+                    current_file: p.current_file.clone(),
+                    stages: Vec::new(),
+                    finished: false,
+                    success: false,
+                    error: None,
+                },
+            );
+        };
+        let progress_cb: &codebaton_transport::ProgressCallback = &on_progress;
+
         let report = peer_name
             .as_deref()
             .ok_or_else(|| "project has no configured peer".to_string())
@@ -1570,6 +1624,7 @@ fn spawn_sync(
                             direction,
                             &confirmed_sensitive,
                             confirm_overwrite,
+                            Some(progress_cb),
                         )
                         .map_err(|e| e.to_string())
                 } else {
@@ -1587,7 +1642,12 @@ fn spawn_sync(
                         .map(|workspace| workspace.name.clone())
                         .ok_or_else(|| format!("project or workspace '{project_id}' not found"))?;
                     backend
-                        .run_workspace_sync(&workspace_name, direction, confirm_overwrite)
+                        .run_workspace_sync(
+                            &workspace_name,
+                            direction,
+                            confirm_overwrite,
+                            Some(progress_cb),
+                        )
                         .map_err(|e| e.to_string())
                 }
             });
@@ -1596,6 +1656,7 @@ fn spawn_sync(
             Ok(report) => {
                 // Stream the real stages as progress frames.
                 let total = report.code_files_transferred + report.session_files_transferred;
+                let bytes = report.bytes_transferred;
                 command_log(
                     "sync_complete",
                     &[
@@ -1606,7 +1667,7 @@ fn spawn_sync(
                         ("direction", dir_str.to_string()),
                         ("remote_dir", remote_dir.clone()),
                         ("file_count", total.to_string()),
-                        ("bytes", "0".to_string()),
+                        ("bytes", bytes.to_string()),
                     ],
                 );
                 let stages: Vec<SyncStageDto> = report
@@ -1631,8 +1692,8 @@ fn spawn_sync(
                             phase: s.name.to_string(),
                             files_done: (total as u32) * s.percent as u32 / 100,
                             files_total: total as u32,
-                            bytes_done: 0,
-                            bytes_total: 0,
+                            bytes_done: bytes * s.percent as u64 / 100,
+                            bytes_total: bytes,
                             speed_bps: 0,
                             eta_secs: 0,
                             current_file: s.current_file.clone(),
@@ -1653,7 +1714,7 @@ fn spawn_sync(
                     dir_str,
                     true,
                     total as u32,
-                    0,
+                    bytes,
                     None,
                     timestamp.clone(),
                     workspace_name.as_deref(),
@@ -1703,7 +1764,7 @@ fn spawn_sync(
                         direction: dir_str.into(),
                         success: true,
                         files: total as u32,
-                        bytes: 0,
+                        bytes,
                         elapsed_secs: 0.0,
                         rewritten_paths: report.rewritten_sessions as u32,
                         skipped_paths: 0,

@@ -486,6 +486,7 @@ impl WorkspaceHarness {
             &self.workspace_name,
             Direction::LocalToRemote,
             confirm_overwrite,
+            None,
         )
     }
 
@@ -543,6 +544,7 @@ impl TwoBackend {
             Direction::LocalToRemote,
             &[],
             confirm_overwrite,
+            None,
         )
     }
 

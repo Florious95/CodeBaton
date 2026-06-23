@@ -20,6 +20,8 @@ fn auto_001_push_to_empty_target() {
 
     let report = h.push(false).expect("空目录推送应成功");
     assert!(report.code_files_transferred >= 3);
+    // bytes_transferred 应反映实际传输字节（修复「显示 0B」）。
+    assert!(report.bytes_transferred > 0, "report 应携带非零 bytes_transferred");
 
     assert_dir_tree_eq(h.a_dir(), h.b_dir()).unwrap();
     assert_no_backup_in(h.b_dir()).unwrap();
@@ -564,6 +566,7 @@ fn auto_042a_concurrent_bidirectional_push() {
                 codebaton_core::Direction::LocalToRemote,
                 &[],
                 false,
+                None,
             );
         });
         let b2 = Arc::clone(&barrier);
@@ -575,6 +578,7 @@ fn auto_042a_concurrent_bidirectional_push() {
                 codebaton_core::Direction::LocalToRemote,
                 &[],
                 false,
+                None,
             );
         });
     });
@@ -588,6 +592,7 @@ fn auto_042a_concurrent_bidirectional_push() {
         codebaton_core::Direction::LocalToRemote,
         &[],
         true,
+        None,
     );
     let a_final = std::fs::read_to_string(h.a_dir().join("base.txt")).unwrap();
     let b_final = std::fs::read_to_string(h.b_dir().join("base.txt")).unwrap();

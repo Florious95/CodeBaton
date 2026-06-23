@@ -30,6 +30,7 @@ impl Backend {
         workspace_name: &str,
         direction: Direction,
         confirm_overwrite: bool,
+        progress: Option<&codebaton_transport::ProgressCallback<'_>>,
     ) -> Result<SyncReport> {
         if direction != Direction::LocalToRemote {
             return Err(AisyncError::Transport(
@@ -58,8 +59,14 @@ impl Backend {
                 live_connection,
             )
         };
-        let outcome =
-            run_workspace_tcp_push(&config_path, &config, &workspace, live_connection, confirm_overwrite)?;
+        let outcome = run_workspace_tcp_push(
+            &config_path,
+            &config,
+            &workspace,
+            live_connection,
+            confirm_overwrite,
+            progress,
+        )?;
         self.persist_workspace_update(outcome.workspace)?;
         Ok(outcome.report)
     }
@@ -82,6 +89,7 @@ impl Backend {
         direction: Direction,
         confirmed_sensitive: &[String],
         confirm_overwrite: bool,
+        progress: Option<&codebaton_transport::ProgressCallback<'_>>,
     ) -> Result<SyncReport> {
         let mut g = self.inner.lock().unwrap();
         let project = g.config.project_mapping(project_name, peer_name)?;
@@ -139,6 +147,7 @@ impl Backend {
                 &project,
                 live_connection,
                 confirm_overwrite,
+                progress,
             ),
             Direction::RemoteToLocal => Err(AisyncError::Transport(
                 "pull over TCP requires a remote control channel; start a local receiver and run send on the peer".to_string(),

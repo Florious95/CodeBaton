@@ -19,6 +19,7 @@ pub(crate) fn run_tcp_push(
     project: &codebaton_core::ProjectMapping,
     live_connection: Option<PeerConnectionInfo>,
     confirm_overwrite: bool,
+    progress: Option<&codebaton_transport::ProgressCallback<'_>>,
 ) -> Result<SyncReport> {
     let connection = peer_transport_connection(config_path, config, peer_name, live_connection)?;
     app_log(
@@ -52,7 +53,7 @@ pub(crate) fn run_tcp_push(
                 .await?
                 .with_confirm_overwrite(confirm_overwrite);
         let code_manifest = transporter
-            .sync_directory_to(&source, Some(&remote_code_dir), None)
+            .sync_directory_to(&source, Some(&remote_code_dir), progress)
             .await?;
         // 发 close_notify 再断，避免对端下次读到「without close_notify」错误。
         transporter.shutdown().await;
@@ -74,7 +75,7 @@ pub(crate) fn run_tcp_push(
                 .sync_directory_to(
                     &plan.staged_project_dir,
                     Some(&plan.remote_project_dir),
-                    None,
+                    progress,
                 )
                 .await?;
             transporter.shutdown().await;
@@ -89,6 +90,9 @@ pub(crate) fn run_tcp_push(
         .iter()
         .map(|(_, plan)| plan.rewritten_sessions)
         .sum();
+    // Bytes transferred = code manifest size + staged session bytes (per tool).
+    let bytes_transferred: u64 = code_manifest.files.iter().map(|f| f.size).sum::<u64>()
+        + session_plans.iter().map(|(_, plan)| plan.bytes).sum::<u64>();
     for ((tool, plan), file_count) in session_plans.iter().zip(session_file_counts.iter()) {
         app_log(
             "session_files_transferred",
@@ -145,6 +149,7 @@ pub(crate) fn run_tcp_push(
         direction: Direction::LocalToRemote,
         code_files_transferred: code_manifest.files.len(),
         session_files_transferred: session_files,
+        bytes_transferred,
         deleted_files: 0,
         rewritten_sessions,
         local_version: 0,
@@ -175,6 +180,7 @@ pub(crate) fn run_workspace_tcp_push(
     workspace: &WorkspaceConfig,
     live_connection: Option<PeerConnectionInfo>,
     confirm_overwrite: bool,
+    progress: Option<&codebaton_transport::ProgressCallback<'_>>,
 ) -> Result<WorkspaceSyncOutcome> {
     let peer_name = workspace.effective_peer().ok_or_else(|| {
         AisyncError::Config(format!("workspace '{}' has no peer", workspace.name))
@@ -265,7 +271,7 @@ pub(crate) fn run_workspace_tcp_push(
                 .await?
                 .with_confirm_overwrite(confirm_overwrite);
         let manifest = transporter
-            .sync_directory_to(&source, Some(&remote_root), None)
+            .sync_directory_to(&source, Some(&remote_root), progress)
             .await;
         transporter.shutdown().await;
         manifest
@@ -307,7 +313,7 @@ pub(crate) fn run_workspace_tcp_push(
                 .await?
                 .with_confirm_overwrite(confirm_overwrite);
                 let manifest = transporter
-                    .sync_directory_to(&child.local_dir, Some(&child.remote_dir), None)
+                    .sync_directory_to(&child.local_dir, Some(&child.remote_dir), progress)
                     .await?;
                 transporter.shutdown().await;
                 app_log(
@@ -351,7 +357,7 @@ pub(crate) fn run_workspace_tcp_push(
                 .await?
                 .with_confirm_overwrite(confirm_overwrite);
                 let manifest = transporter
-                    .sync_directory_to(&transfer.staged_dir, Some(&transfer.remote_dir), None)
+                    .sync_directory_to(&transfer.staged_dir, Some(&transfer.remote_dir), progress)
                     .await?;
                 transporter.shutdown().await;
                 plan_files += manifest.files.len();
@@ -370,6 +376,9 @@ pub(crate) fn run_workspace_tcp_push(
         .iter()
         .map(|plan| plan.rewritten_sessions)
         .sum();
+    // Bytes transferred = whole-root code manifest size + staged session bytes.
+    let bytes_transferred: u64 = source_manifest.files.iter().map(|f| f.size).sum::<u64>()
+        + session_plans.iter().map(|plan| plan.bytes).sum::<u64>();
     for (plan, file_count) in session_plans.iter().zip(session_file_counts.iter()) {
         app_log(
             "session_files_transferred",
@@ -405,6 +414,7 @@ pub(crate) fn run_workspace_tcp_push(
             direction: Direction::LocalToRemote,
             code_files_transferred: code_files,
             session_files_transferred: session_files,
+            bytes_transferred,
             deleted_files: 0,
             rewritten_sessions,
             local_version: 0,

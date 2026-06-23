@@ -105,7 +105,7 @@ fn run_sync_requires_remote_transport_and_does_not_write_local_remote_path() {
     let backend = Backend::with_config(config, root.join("config.toml")).unwrap();
 
     let error = backend
-        .run_sync("proj", "peer", Direction::LocalToRemote, &[], false)
+        .run_sync("proj", "peer", Direction::LocalToRemote, &[], false, None)
         .unwrap_err()
         .to_string();
 
@@ -141,7 +141,7 @@ fn run_sync_uses_configured_tcp_endpoint() {
 
     let backend = Backend::with_config(config, root.join("config.toml")).unwrap();
     let report = backend
-        .run_sync("proj", "peer", Direction::LocalToRemote, &[], false)
+        .run_sync("proj", "peer", Direction::LocalToRemote, &[], false, None)
         .unwrap();
 
     assert_eq!(report.code_files_transferred, 1);
@@ -483,7 +483,7 @@ fn gui_instance_pushes_to_peer_serve_daemon() {
 
     // A pushes to B over real TCP/TLS.
     let report = backend_a
-        .run_sync("myproj", "B", Direction::LocalToRemote, &[], false)
+        .run_sync("myproj", "B", Direction::LocalToRemote, &[], false, None)
         .expect("push to peer GUI should succeed");
     assert!(report.code_files_transferred >= 1);
     assert!(report.session_files_transferred >= 1);
@@ -638,7 +638,7 @@ fn add_workspace_persists_entity_and_syncs_whole_root_tree() {
     assert_eq!(processed, 1);
 
     let report = backend_a
-        .run_workspace_sync("workspace", Direction::LocalToRemote, false)
+        .run_workspace_sync("workspace", Direction::LocalToRemote, false, None)
         .expect("workspace sync should push whole root");
     assert_eq!(report.project_id, "workspace");
     assert!(report.code_files_transferred >= 2);

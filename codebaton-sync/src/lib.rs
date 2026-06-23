@@ -31,6 +31,9 @@ pub struct SyncReport {
     pub direction: Direction,
     pub code_files_transferred: usize,
     pub session_files_transferred: usize,
+    /// Total bytes in the synced manifests (code + sessions). Surfaced in the UI
+    /// result/history; computed as `manifest.files.iter().map(|f| f.size).sum()`.
+    pub bytes_transferred: u64,
     pub deleted_files: usize,
     pub rewritten_sessions: usize,
     pub local_version: u64,
@@ -324,12 +327,15 @@ impl SyncCoordinator {
             .record_success(&project.project_id, &local_after, &remote_after);
         self.state.save(&self.config.state_path())?;
 
+        let bytes_transferred: u64 = changed_code.iter().map(|f| f.size).sum::<u64>()
+            + changed_sessions.iter().map(|f| f.size).sum::<u64>();
         Ok(SyncReport {
             project_id: project.project_id.clone(),
             peer_id: *peer_id,
             direction,
             code_files_transferred: changed_code.len(),
             session_files_transferred: changed_sessions.len(),
+            bytes_transferred,
             deleted_files: code_diff.deleted.len() + session_diff.deleted.len(),
             rewritten_sessions,
             local_version: versions.local_version,
