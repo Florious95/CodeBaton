@@ -30,7 +30,6 @@ function AddProjectDialog() {
   const [name, setName] = useState("");
   const [localDir, setLocalDir] = useState("");
   const [peer, setPeer] = useState("");
-  const [tool, setTool] = useState("same");
   const valid = localDir.trim() && peer.trim();
 
   useEffect(() => {
@@ -72,7 +71,6 @@ function AddProjectDialog() {
                   localDir,
                   peer,
                   mode: "oneWayPush",
-                  tool,
                   createLocalDir,
                 });
               };
@@ -140,14 +138,6 @@ function AddProjectDialog() {
               {p.name}
             </option>
           ))}
-        </select>
-      </div>
-      <div className="field">
-        <label>{t.targetAiTool}</label>
-        <select value={tool} onChange={(e) => setTool(e.target.value)}>
-          <option value="same">{t.sameToolOpt}</option>
-          <option value="codex">{t.toCodex}</option>
-          <option value="gemini">{t.toGemini}</option>
         </select>
       </div>
     </Dialog>
@@ -587,6 +577,33 @@ function UnpairDialog({ peerId }: { peerId: string }) {
 }
 
 // ── Handoff preview (manifest before a manual push) ──────────────────
+
+// Human-readable name for an AI tool key as returned by preview_handoff.
+function toolDisplayName(tool: string): string {
+  switch (tool) {
+    case "claude":
+      return "Claude";
+    case "codex":
+      return "Codex";
+    default:
+      return tool;
+  }
+}
+
+// The other tool a group could be converted to (conversion itself is not yet
+// implemented — the option is shown greyed-out). Returns null if there's no
+// known conversion target for this tool.
+function convertTargetName(tool: string): string | null {
+  switch (tool) {
+    case "claude":
+      return "Codex";
+    case "codex":
+      return "Claude";
+    default:
+      return null;
+  }
+}
+
 function HandoffPreviewDialog({
   projectId,
   peerName,
@@ -649,10 +666,35 @@ function HandoffPreviewDialog({
             {manifest.incremental ? t.handoffIncremental : t.handoffFull}
           </p>
           {manifest.sessions.length > 0 && (
-            <div className="muted" style={{ marginBottom: 10 }}>
-              {manifest.sessions
-                .map((g) => `${g.tool}: ${g.fileCount} ${t.files} (${fmtBytes(g.bytes)})`)
-                .join("  ·  ")}
+            <div style={{ marginBottom: 12 }}>
+              {manifest.sessions.map((g) => {
+                const name = toolDisplayName(g.tool);
+                const other = convertTargetName(g.tool);
+                return (
+                  <div key={g.tool} className="handoff-tool-group" style={{ marginBottom: 8 }}>
+                    <div className="muted">
+                      {t.handoffToolGroup(name, g.fileCount, fmtBytes(g.bytes))}
+                    </div>
+                    <div className="row" style={{ gap: 16, marginTop: 4 }}>
+                      {/* This round only the keep-original path runs; conversion
+                          is greyed out ("coming soon") until format conversion lands. */}
+                      <label className="radio" style={{ cursor: "default" }}>
+                        <input type="radio" name={`tool-${g.tool}`} checked readOnly />
+                        {t.handoffKeepTool(name)}
+                      </label>
+                      {other && (
+                        <label
+                          className="radio"
+                          style={{ cursor: "not-allowed", opacity: 0.5 }}
+                        >
+                          <input type="radio" name={`tool-${g.tool}`} disabled />
+                          {t.handoffConvertSoon(other)}
+                        </label>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
             </div>
           )}
           <p className="faint" style={{ marginBottom: 12 }}>{t.handoffExcludedHint}</p>

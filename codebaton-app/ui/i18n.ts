@@ -202,6 +202,10 @@ const dictZh = {
     handoffForceOverwrite: "强制覆盖对端（覆盖前自动备份）",
     handoffStart: "开始交接",
     handoffFailed: "无法生成交接清单",
+    handoffKeepTool: (tool: string) => `保持 ${tool}`,
+    handoffConvertSoon: (tool: string) => `转为 ${tool}（即将支持）`,
+    handoffToolGroup: (tool: string, count: number, size: string) =>
+      `${tool}：${count} 文件 (${size})`,
     peerOfflineCantSync: (peer: string) => `${peer} 离线，无法同步`,
     splitBrainTitle: "两端都有变化",
     splitBrainBody: (peer: string) =>
@@ -423,6 +427,10 @@ const dictEn: Strings = {
     handoffForceOverwrite: "Force-overwrite peer (auto-backup before overwrite)",
     handoffStart: "Start handoff",
     handoffFailed: "Could not build the handoff manifest",
+    handoffKeepTool: (tool: string) => `Keep ${tool}`,
+    handoffConvertSoon: (tool: string) => `Convert to ${tool} (coming soon)`,
+    handoffToolGroup: (tool: string, count: number, size: string) =>
+      `${tool}: ${count} files (${size})`,
     peerOfflineCantSync: (peer: string) => `${peer} is offline; cannot sync`,
     splitBrainTitle: "Both sides have changes",
     splitBrainBody: (peer: string) =>

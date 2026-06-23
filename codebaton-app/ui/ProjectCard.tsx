@@ -82,10 +82,6 @@ export function ProjectCard({ project }: { project: Project }) {
             <span className="path" style={{ gridColumn: "2/4" }}>
               {project.localSessionDir}
             </span>
-            <span className="label">{t.targetTool}</span>
-            <span style={{ gridColumn: "2/4" }}>
-              <span className="chip">{project.targetTool} ▾</span>
-            </span>
             <span className="label">{t.excludeRules}</span>
             <span className="path">{project.excludeRules.join(", ")}</span>
             <button className="ghost" onClick={() => setDialog({ kind: "excludeRules", projectId: project.id })}>

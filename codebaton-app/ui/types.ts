@@ -58,7 +58,6 @@ export interface Project {
   peerId: string;
   peerName: string;
   mode: SyncMode;
-  targetTool: string;
   status: ProjectSyncStatus;
   progress: number | null;
   lastSync: string | null;
