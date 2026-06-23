@@ -14,7 +14,7 @@ const dictZh = {
     selfMachine: "本机", aiSessions: "AI 工具会话", syncProjects: "同步项目",
     projSessions: "个项目会话", addProject: "添加项目", synced: "已同步", last: "上次", minAgo: "分钟前", mode: "模式", biAuto: "双向自动",
     files: "文件",
-    localPath: "本机路径", remotePath: "对端路径", sessionDir: "会话目录", syncMode: "同步模式",
+    localPath: "本机路径", remotePath: "对端路径", sessionDir: "会话目录",
     excludeRules: "排除规则", recentSync: "最近同步",
     success: "成功", failed: "失败", connLost: "连接中断", modify: "修改",
     pushToHome: "推送到", deleteMapping: "删除映射", deleteFailed: "删除映射失败",
@@ -44,10 +44,7 @@ const dictZh = {
     mkdirAndSent: "已创建目录并发送项目映射请求",
     addFailed: (m: string) => `添加失败：${m}`,
     // ── Add workspace dialog (D2) ─────────────────────────
-    addedWorkspace: (n: number) => `已添加工作区（${n} 个子项目）`,
-    addWsFailed: (m: string) => `添加工作区失败：${m}`,
     // ── Enable child dialog (D3) ──────────────────────────
-    remoteDirAutofill: "基于工作区映射自动填充，可修改",
     childEnabled: (c: string) => `已开启 ${c} 同步`,
     // ── Pairing dialog (D4) ───────────────────────────────
     pairReqSent: "配对请求已发送", cancelPair: "取消配对", confirmPair: "确认配对",
@@ -63,8 +60,6 @@ const dictZh = {
     initiatorDevice: "发起设备", remoteDir: "对端目录", localPlaceDir: "本机安放目录",
     pickProjDirPlaceholder: "选择本机用于同步该项目的目录",
     projMapConfirmed: "已确认项目映射", confirmFailed: (m: string) => `确认失败：${m}`,
-    pickWsRootPlaceholder: "选择本机用于同步该工作区的根目录",
-    wsMapConfirmed: "已确认工作区映射",
     // ── Conflict dialog (D5) ──────────────────────────────
     conflictTitle: "检测到冲突", confirmOverwrite: "确认覆盖", execute: "执行",
     conflictDesc: (n: string) => `项目 “${n}” 的两端都有未同步的变更，无法自动同步。`,
@@ -113,10 +108,7 @@ const dictZh = {
     reasonLabel: (r: string) => `原因: ${r}`,
     // ── Discovered children dialog (D11) ──────────────────
     selectedEnabled: "已开启选中的子项目",
-    discoveredIntro: (r: string) => `工作区 ${r} 中发现了以下新的子目录：`,
     discoveredAtRemote: (at: string, dir: string) => `创建于 ${at} · 对端可能的路径: ${dir}`,
-    discoveredHint: (peer: string) =>
-        `选中的子项目将使用工作区默认设置开启同步。\n同步模式: 双向自动 · 目标设备: ${peer}`,
     // ── Wizard dialog (D12) ───────────────────────────────
     wizardTitle: (step: number) => `欢迎使用 CodeBaton — Step ${step}/3`,
     prevStep: "上一步", nextStep: "下一步", done: "完成",
@@ -221,7 +213,7 @@ const dictEn: Strings = {
     selfMachine: "This Device", aiSessions: "AI Tool Sessions", syncProjects: "Synced Projects",
     projSessions: "project sessions", addProject: "Add Project", synced: "Synced", last: "Last", minAgo: "min ago", mode: "Mode", biAuto: "Two-way auto",
     files: "files",
-    localPath: "Local path", remotePath: "Remote path", sessionDir: "Session dir", syncMode: "Sync mode",
+    localPath: "Local path", remotePath: "Remote path", sessionDir: "Session dir",
     excludeRules: "Exclude rules", recentSync: "Recent syncs",
     success: "OK", failed: "Failed", connLost: "Connection lost", modify: "Edit",
     pushToHome: "Push to", deleteMapping: "Delete mapping", deleteFailed: "Failed to delete mapping",
@@ -247,9 +239,6 @@ const dictEn: Strings = {
     localDirMissing: (d: string) => `Local directory does not exist:\n${d}\n\nCreate it and continue?`,
     mkdirAndSent: "Directory created and project mapping request sent",
     addFailed: (m: string) => `Add failed: ${m}`,
-    addedWorkspace: (n: number) => `Workspace added (${n} sub-project(s))`,
-    addWsFailed: (m: string) => `Add workspace failed: ${m}`,
-    remoteDirAutofill: "Auto-filled from workspace mapping, editable",
     childEnabled: (c: string) => `${c} sync enabled`,
     pairReqSent: "Pairing Request Sent", cancelPair: "Cancel Pairing", confirmPair: "Confirm Pairing",
     pairFailed: (m: string) => `Pairing failed: ${m}`, pairFailedLabel: "Pairing failed: ",
@@ -263,8 +252,6 @@ const dictEn: Strings = {
     initiatorDevice: "Initiator device", remoteDir: "Remote directory", localPlaceDir: "Local target directory",
     pickProjDirPlaceholder: "Pick a local directory to sync this project",
     projMapConfirmed: "Project mapping confirmed", confirmFailed: (m: string) => `Confirm failed: ${m}`,
-    pickWsRootPlaceholder: "Pick a local root to sync this workspace",
-    wsMapConfirmed: "Workspace mapping confirmed",
     conflictTitle: "Conflict Detected", confirmOverwrite: "Confirm Overwrite", execute: "Apply",
     conflictDesc: (n: string) => `Both sides of project “${n}” have unsynced changes; auto-sync is not possible.`,
     changedAfterSync: (n: number) => `Changed since last sync: ${n} file(s)`,
@@ -306,10 +293,7 @@ const dictEn: Strings = {
     skippedCount: (n: number) => `Skipped (${n}, low confidence)`,
     reasonLabel: (r: string) => `Reason: ${r}`,
     selectedEnabled: "Selected sub-projects enabled",
-    discoveredIntro: (r: string) => `Found these new sub-directories in workspace ${r}:`,
     discoveredAtRemote: (at: string, dir: string) => `Created ${at} · likely remote path: ${dir}`,
-    discoveredHint: (peer: string) =>
-        `Selected sub-projects will sync using the workspace defaults.\nSync mode: Two-way auto · Target device: ${peer}`,
     wizardTitle: (step: number) => `Welcome to CodeBaton — Step ${step}/3`,
     prevStep: "Back", nextStep: "Next", done: "Done",
     nameThisDevice: "Give this device a name so it's easy to recognize on other devices:",
