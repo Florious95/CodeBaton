@@ -62,9 +62,14 @@ pub(crate) fn run_tcp_push(
             let identity = generate_tls_identity("aisync-client")?;
             let tls = TlsConfig::new(identity, connection.server_name.clone())
                 .with_pinned_peer_cert(connection.receiver_cert_der.clone());
+            // Bug fix: thread confirm_overwrite into the SESSION transporter too.
+            // Without it the conversation-dir push defaults to confirm_overwrite=false,
+            // so a force handoff that replaces ~/.claude/projects/<encoded> (high
+            // delete ratio) was wrongly aborted by the 50% safety valve.
             let mut transporter =
                 TcpTransporter::connect_to_peer(&connection.peer, connection.endpoint.port(), &tls)
-                    .await?;
+                    .await?
+                    .with_confirm_overwrite(confirm_overwrite);
             let manifest = transporter
                 .sync_directory_to(
                     &plan.staged_project_dir,
@@ -169,6 +174,7 @@ pub(crate) fn run_workspace_tcp_push(
     config: &SyncConfig,
     workspace: &WorkspaceConfig,
     live_connection: Option<PeerConnectionInfo>,
+    confirm_overwrite: bool,
 ) -> Result<WorkspaceSyncOutcome> {
     let peer_name = workspace.effective_peer().ok_or_else(|| {
         AisyncError::Config(format!("workspace '{}' has no peer", workspace.name))
@@ -256,7 +262,8 @@ pub(crate) fn run_workspace_tcp_push(
             .with_pinned_peer_cert(connection.receiver_cert_der.clone());
         let mut transporter =
             TcpTransporter::connect_to_peer(&connection.peer, connection.endpoint.port(), &tls)
-                .await?;
+                .await?
+                .with_confirm_overwrite(confirm_overwrite);
         let manifest = transporter
             .sync_directory_to(&source, Some(&remote_root), None)
             .await;
@@ -297,7 +304,8 @@ pub(crate) fn run_workspace_tcp_push(
                     connection.endpoint.port(),
                     &tls,
                 )
-                .await?;
+                .await?
+                .with_confirm_overwrite(confirm_overwrite);
                 let manifest = transporter
                     .sync_directory_to(&child.local_dir, Some(&child.remote_dir), None)
                     .await?;
@@ -340,7 +348,8 @@ pub(crate) fn run_workspace_tcp_push(
                     connection.endpoint.port(),
                     &tls,
                 )
-                .await?;
+                .await?
+                .with_confirm_overwrite(confirm_overwrite);
                 let manifest = transporter
                     .sync_directory_to(&transfer.staged_dir, Some(&transfer.remote_dir), None)
                     .await?;

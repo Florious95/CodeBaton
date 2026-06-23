@@ -139,7 +139,8 @@ pub(crate) fn run_workspace_auto_sync_outcome(
     workspace: &WorkspaceConfig,
     live_connection: Option<PeerConnectionInfo>,
 ) -> Result<WorkspaceSyncOutcome> {
-    let outcome = run_workspace_tcp_push(config_path, config, workspace, live_connection)?;
+    // Workspace-establish initial sync never force-overwrites the peer.
+    let outcome = run_workspace_tcp_push(config_path, config, workspace, live_connection, false)?;
     let mut updated = config.clone();
     replace_workspace(&mut updated, outcome.workspace.clone());
     save_config(config_path, &updated)?;

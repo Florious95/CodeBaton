@@ -638,7 +638,7 @@ fn add_workspace_persists_entity_and_syncs_whole_root_tree() {
     assert_eq!(processed, 1);
 
     let report = backend_a
-        .run_workspace_sync("workspace", Direction::LocalToRemote)
+        .run_workspace_sync("workspace", Direction::LocalToRemote, false)
         .expect("workspace sync should push whole root");
     assert_eq!(report.project_id, "workspace");
     assert!(report.code_files_transferred >= 2);

@@ -1,9 +1,12 @@
 //! Split-brain detection/resolution and the sync entry points
 //! (`run_sync`/`run_workspace_sync`).
 //!
-//! ⚠️ Lock discipline here is BEHAVIOR-CRITICAL (documented Rule1 exception):
-//! - `run_sync` holds the inner guard ACROSS the network call, exclude
-//!   restore, and the in-memory snapshot sync-back — it drops only at fn end.
+//! ⚠️ Lock discipline here is BEHAVIOR-CRITICAL:
+//! - `run_sync` extracts everything it needs (project mapping, config clone with
+//!   excludes, live connection) under the guard, restores excludes, then DROPS
+//!   the guard before the network push — manual handoff is UI-driven, so holding
+//!   the single Inner mutex across a multi-second push would freeze every UI
+//!   command. It re-acquires briefly afterward only to sync the snapshot back.
 //! - `run_workspace_sync` uses a scoped block that drops the guard before the
 //!   network push.
 //! - `probe_peer_target` explicitly drops the guard before its network call.
@@ -26,6 +29,7 @@ impl Backend {
         &self,
         workspace_name: &str,
         direction: Direction,
+        confirm_overwrite: bool,
     ) -> Result<SyncReport> {
         if direction != Direction::LocalToRemote {
             return Err(AisyncError::Transport(
@@ -54,7 +58,8 @@ impl Backend {
                 live_connection,
             )
         };
-        let outcome = run_workspace_tcp_push(&config_path, &config, &workspace, live_connection)?;
+        let outcome =
+            run_workspace_tcp_push(&config_path, &config, &workspace, live_connection, confirm_overwrite)?;
         self.persist_workspace_update(outcome.workspace)?;
         Ok(outcome.report)
     }
@@ -91,15 +96,28 @@ impl Backend {
             .map(|s| s.relative_path.clone())
             .collect();
 
-        // Inject the per-run excludes onto the project config entry. Restore
-        // afterwards so confirmation is scoped to this single sync.
+        // Inject the per-run excludes onto the project config entry, clone the
+        // config for the push, then restore the in-memory excludes immediately —
+        // the clone already captured them, so the live config stays clean and we
+        // can release the lock before the (slow) network I/O.
         let saved = inject_excludes(&mut g.config, project_name, &unconfirmed);
 
         let live_connection = live_connection_for_config_peer(&g, peer_name);
         let coordinator_cfg = g.config.clone();
+        restore_excludes(&mut g.config, project_name, saved);
         let config_path = g.config_path.clone();
         let log_project = project.project_id.clone();
         let log_remote = project.remote_code_dir.display().to_string();
+        // Release the Inner lock BEFORE the network push. The push can take tens
+        // of seconds (multi-hundred-MB session dirs); holding the single Inner
+        // mutex across it froze every UI command (get_overview / status / config)
+        // for the whole duration. Manual handoff is UI-driven, so we must not
+        // block the lock during I/O. Excludes are already restored above and the
+        // push uses the captured `coordinator_cfg` clone, so dropping is safe.
+        drop(g);
+
+        // directory_bytes walks the trees (slow on large session dirs) and is
+        // only for the sync_started log — compute it AFTER releasing the lock.
         let log_bytes = directory_bytes(&project.local_code_dir).unwrap_or(0)
             + directory_bytes(&project.local_session_dir).unwrap_or(0);
         app_log(
@@ -112,6 +130,7 @@ impl Backend {
                 ("bytes", log_bytes.to_string()),
             ],
         );
+
         let result = match direction {
             Direction::LocalToRemote => run_tcp_push(
                 &config_path,
@@ -126,10 +145,11 @@ impl Backend {
             )),
         };
 
-        restore_excludes(&mut g.config, project_name, saved);
-        // run_tcp_push 把成功同步的快照写到了磁盘 config；这里同步回内存 config，
-        // 否则 check_split_brain 等读内存的逻辑看不到刚写的快照（in-memory/disk 不一致）。
+        // Re-acquire only to sync the freshly-persisted snapshot back into memory;
+        // run_tcp_push wrote it to disk config, and check_split_brain/preview read
+        // the in-memory copy (else in-memory/disk diverge).
         if result.is_ok() {
+            let mut g = self.inner.lock().unwrap();
             if let Ok(persisted) = load_config(&g.config_path) {
                 if let Some(snap) = persisted.sync_snapshot(project_name, peer_name) {
                     g.config.set_sync_snapshot(project_name, peer_name, snap);

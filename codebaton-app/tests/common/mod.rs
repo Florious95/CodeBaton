@@ -477,8 +477,16 @@ impl WorkspaceHarness {
 
     /// A → B 工作区同步（推送整棵子目录树）。
     pub fn sync(&self) -> Result<codebaton_sync::SyncReport> {
-        self.a
-            .run_workspace_sync(&self.workspace_name, Direction::LocalToRemote)
+        self.sync_overwrite(false)
+    }
+
+    /// 工作区推送，可指定强制覆盖（放行覆盖 + >50% 安全阀，覆盖前备份）。
+    pub fn sync_overwrite(&self, confirm_overwrite: bool) -> Result<codebaton_sync::SyncReport> {
+        self.a.run_workspace_sync(
+            &self.workspace_name,
+            Direction::LocalToRemote,
+            confirm_overwrite,
+        )
     }
 
     /// 新建一个工作区子目录（可仅含会话、无代码文件）。
@@ -488,6 +496,11 @@ impl WorkspaceHarness {
 
     pub fn write_child(&self, child: &str, rel: &str, content: &str) {
         write_file(&self.a_workspace_root.join(child).join(rel), content).unwrap();
+    }
+
+    /// 删除 A 工作区某子目录下的一个文件（用于构造高比例删除以触发安全阀）。
+    pub fn remove_child_file(&self, child: &str, rel: &str) {
+        let _ = fs::remove_file(self.a_workspace_root.join(child).join(rel));
     }
 
     /// B 接收端工作区根。

@@ -638,6 +638,40 @@ fn auto_031_workspace_new_chat_only_child() {
     );
 }
 
+/// AUTO-WS-OVERWRITE workspace 强制覆盖绕过安全阀（reviewer 发现的 workspace 通道
+/// 缺口回归）：工作区同步后 A 删掉大比例文件 → 不勾强制时安全阀中止；勾强制时整条
+/// workspace 通道（run_workspace_tcp_push）把 confirm_overwrite 传到 transport，
+/// 放行删除并先备份。
+#[test]
+fn auto_ws_overwrite_bypasses_safety_valve() {
+    let h = WorkspaceHarness::builder()
+        .workspace_name("ws-ovw")
+        .a_child_file("app", "f1.txt", "1\n")
+        .a_child_file("app", "f2.txt", "2\n")
+        .a_child_file("app", "f3.txt", "3\n")
+        .a_child_file("app", "f4.txt", "4\n")
+        .a_child_file("app", "f5.txt", "5\n")
+        .a_child_file("app", "f6.txt", "6\n")
+        .build();
+    h.sync().expect("首次工作区同步");
+
+    // A 删掉 4/6（>50%）。
+    for f in ["f1.txt", "f2.txt", "f3.txt", "f4.txt"] {
+        h.remove_child_file("app", f);
+    }
+
+    // 不勾强制：安全阀应中止（confirm_overwrite=false 流经整条 workspace 通道）。
+    let aborted = h.sync();
+    assert!(
+        aborted.is_err(),
+        "未勾强制时大比例删除应被安全阀中止（证明 confirm_overwrite=false 已传到 transport）"
+    );
+
+    // 勾强制：放行删除并先备份（证明 confirm_overwrite=true 已传到 transport）。
+    h.sync_overwrite(true).expect("强制覆盖应放行大比例删除");
+    assert_backup_exists(h.b_root().parent().unwrap(), "ws-ovw").unwrap();
+}
+
 // ── Suite H/I：性能、资源、路径边界（用现有 harness 可覆盖部分）──────
 //
 // 注：性能用例用「同阶但更快」的规模（如 2000 文件 / 1MB 大文件代替 10000/512MB），

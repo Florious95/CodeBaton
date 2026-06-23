@@ -1587,7 +1587,7 @@ fn spawn_sync(
                         .map(|workspace| workspace.name.clone())
                         .ok_or_else(|| format!("project or workspace '{project_id}' not found"))?;
                     backend
-                        .run_workspace_sync(&workspace_name, direction)
+                        .run_workspace_sync(&workspace_name, direction, confirm_overwrite)
                         .map_err(|e| e.to_string())
                 }
             });
