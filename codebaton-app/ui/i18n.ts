@@ -4,71 +4,51 @@
 //
 // Most values are plain strings. A few are functions for interpolated text
 // (counts, names, verbs) so callers stay translation-safe: e.g. t.addedWorkspace(3).
-
 export type Lang = "zh" | "en";
-
 const dictZh = {
     online: "在线", offline: "离线", syncing: "同步中", idle: "空闲",
     paired: "已配对设备", discovered: "发现的设备", settings: "设置",
-    pair: "配对", view: "查看", push: "推送", pull: "拉取", pullDisabledHint: "拉取功能开发中", cancel: "取消",
-    enable: "开启", manage: "管理", edit: "编辑", save: "保存", close: "关闭",
+    pair: "配对", view: "查看", push: "推送", cancel: "取消",
+    manage: "管理", edit: "编辑", save: "保存", close: "关闭",
     browse: "浏览", confirm: "确认", ignoreAll: "忽略全部", later: "稍后处理",
     selfMachine: "本机", aiSessions: "AI 工具会话", syncProjects: "同步项目",
-    projSessions: "个项目会话", addProject: "添加项目", addWorkspace: "添加工作区",
-    synced: "已同步", last: "上次", minAgo: "分钟前", mode: "模式", biAuto: "双向自动",
-    workspace: "工作区", notEnabled: "未开启", newSubFound: "个新发现的子项目", files: "文件",
+    projSessions: "个项目会话", addProject: "添加项目", synced: "已同步", last: "上次", minAgo: "分钟前", mode: "模式", biAuto: "双向自动",
+    files: "文件",
     localPath: "本机路径", remotePath: "对端路径", sessionDir: "会话目录", syncMode: "同步模式",
-    targetTool: "目标工具", excludeRules: "排除规则", recentSync: "最近同步",
+    excludeRules: "排除规则", recentSync: "最近同步",
     success: "成功", failed: "失败", connLost: "连接中断", modify: "修改",
-    pushToHome: "推送到", pullFromHome: "拉取自", deleteMapping: "删除映射", deleteFailed: "删除映射失败",
+    pushToHome: "推送到", deleteMapping: "删除映射", deleteFailed: "删除映射失败",
     pairedTime: "配对时间", claudeMap: "Claude 配置映射", projMap: "项目映射",
     localM: "本机", remoteM: "对端", addProjMap: "添加项目映射", syncHistory: "同步历史",
-    pushAll: "全部推送", pullAll: "全部拉取", unpair: "解除配对",
+    pushAll: "全部推送", unpair: "解除配对",
     lastSyncLabel: "上次同步", conflictDetected: "检测到冲突", handle: "处理",
-    pausedAuto: "已暂停自动同步",
     settingsTitle: "设置", deviceName: "设备名称", deviceId: "设备 ID",
-
     // ── App shell / titlebar ──────────────────────────────
     theme: "主题", themeDark: "暗色", themeLight: "亮色", themeSystem: "跟随系统",
     browserPreview: "浏览器预览模式，后端 IPC 不可用 — 请用 npm run tauri dev 启动。",
-
     // ── Tabs (PeerDetail) ─────────────────────────────────
     tabMappings: "映射关系", tabHistory: "同步历史", tabChat: "对话", tabFiles: "文件传输",
     peerNotFound: "设备不存在", statusLabel: "状态:", pairedAt: (t: string) => `· 配对于 ${t}`,
-    workspaceMap: "工作区映射", workspaceColon: "工作区:", conflictPill: "⚠ 冲突",
-    newlyDiscoveredTag: "新发现", noProjMap: "暂无项目映射", noSyncHistory: "暂无同步历史",
+    noProjMap: "暂无项目映射", noSyncHistory: "暂无同步历史",
     deviceOffline: "设备离线",
     histPush: "→推送", histPull: "←拉取", trigAuto: "自动", trigManual: "手动",
     pillSynced: "● 已同步", pillSyncing: (p: number) => `◐ 同步中 ${p}%`, pillIdle: "○",
-    syncingPct: (p: number) => `同步中 ${p}%`,
     histFiles: (n: number, b: string) => `${n}文件 ${b}`,
-
     // ── Add project dialog (D1) ───────────────────────────
     addProjTitle: "添加项目映射", projName: "项目名称",
     projNamePlaceholder: "可选，留空则使用目录名", localDir: "本机目录",
     localDirPlaceholder: "点「浏览」选择本机项目目录", targetDevice: "目标设备",
     noPairedPeerPick: "（无配对设备 — 请先配对）", noPairedPeer: "（无配对设备）",
-    twoWayAutoSync: "双向自动同步", oneWayPushLocal: "单向推送（本机 → 对端）",
-    oneWayPushRemote: "单向推送（对端 → 本机）", targetAiTool: "目标 AI 工具",
-    sameToolOpt: "Claude Code (同工具)", toCodex: "转换为 Codex", toGemini: "转换为 Gemini CLI",
     projReqSent: "已发送项目映射请求，等待对端选择目录",
     localDirMissing: (d: string) => `本机目录不存在：\n${d}\n\n是否创建该目录并继续添加？`,
     mkdirAndSent: "已创建目录并发送项目映射请求",
     addFailed: (m: string) => `添加失败：${m}`,
-
     // ── Add workspace dialog (D2) ─────────────────────────
-    addWsTitle: "添加工作区映射", wsName: "工作区名称", localRoot: "本机根目录",
-    scannedChildren: "扫描到的子项目", scanHint: "选择本机根目录后点「浏览」自动扫描",
-    defaultSyncMode: "默认同步模式", twoWayAuto: "双向自动", oneWayPush: "单向推送",
-    newChildren: "新子项目", autoEnableSync: "自动开启同步", manualEnable: "手动确认后开启",
     addedWorkspace: (n: number) => `已添加工作区（${n} 个子项目）`,
     addWsFailed: (m: string) => `添加工作区失败：${m}`,
-
     // ── Enable child dialog (D3) ──────────────────────────
-    enableChildTitle: "开启子项目同步", subProject: "子项目",
     remoteDirAutofill: "基于工作区映射自动填充，可修改",
     childEnabled: (c: string) => `已开启 ${c} 同步`,
-
     // ── Pairing dialog (D4) ───────────────────────────────
     pairReqSent: "配对请求已发送", cancelPair: "取消配对", confirmPair: "确认配对",
     pairFailed: (m: string) => `配对失败：${m}`, pairFailedLabel: "配对失败：",
@@ -78,16 +58,13 @@ const dictZh = {
     samePairCodeHint: "两端必须显示相同的配对码才能配对",
     pairedWith: (n: string) => `已与 ${n} 配对`,
     confirmPairFailed: (m: string) => `确认配对失败：${m}`,
-
     // ── Mapping request dialogs ───────────────────────────
     projMapReqTitle: "项目映射请求", confirmMap: "确认映射",
     initiatorDevice: "发起设备", remoteDir: "对端目录", localPlaceDir: "本机安放目录",
     pickProjDirPlaceholder: "选择本机用于同步该项目的目录",
     projMapConfirmed: "已确认项目映射", confirmFailed: (m: string) => `确认失败：${m}`,
-    wsMapReqTitle: "工作区映射请求", remoteRoot: "对端根目录",
     pickWsRootPlaceholder: "选择本机用于同步该工作区的根目录",
     wsMapConfirmed: "已确认工作区映射",
-
     // ── Conflict dialog (D5) ──────────────────────────────
     conflictTitle: "检测到冲突", confirmOverwrite: "确认覆盖", execute: "执行",
     conflictDesc: (n: string) => `项目 “${n}” 的两端都有未同步的变更，无法自动同步。`,
@@ -98,7 +75,6 @@ const dictZh = {
     preferRemote: "以对端为准（本机变更将被覆盖）",
     preferNone: "暂不处理（保持两端各自的状态）",
     overwriteWarn: "⚠ 被覆盖的一方变更将不可恢复，建议先手动备份",
-
     // ── Batch dialog (D6) ─────────────────────────────────
     batchTitle: (verb: string) => `批量${verb}确认`, start: "开始",
     batchIntro: (target: string, verb: string) => `即将${target}${verb}以下项目：`,
@@ -108,19 +84,16 @@ const dictZh = {
     total: "总计", totalSummary: (n: number, b: string) => `${n} 个文件  约 ${b}`,
     sensitiveMatched: "以下文件匹配敏感文件模式：",
     includeThisFile: (f: string) => `包含此文件 — ${f}`,
-
     // ── Exclude rules dialog (D7) ─────────────────────────
     excludeRulesTitle: (n: string) => `排除规则 — ${n}`,
     globalRulesRO: "全局规则（从设置继承，只读）", projSpecificRules: "项目专属规则",
     globPerLine: "每行一条 glob 模式", excludeSaved: "已保存排除规则",
-
     // ── Unpair dialog (D8) ────────────────────────────────
     unpairTitle: "解除配对", thisDevice: "该设备",
     unpairConfirm: (n: string) => `确定要解除与 ${n} 的配对吗？`,
     unpairAfter: "解除后：", unpairBullet1: "该设备的所有项目映射将被删除",
     unpairBullet2: "已同步到对端的文件不会被删除",
     unpairBullet3: "如需重新配对，需要再次确认配对码",
-
     // ── Sync progress / result (D9) ───────────────────────
     syncDone: "同步完成", syncFailed: "同步失败", syncInProgress: "同步进行中",
     minimizeToBackground: "最小化到后台", cancelSync: "取消同步",
@@ -133,21 +106,17 @@ const dictZh = {
     dataAmount: "数据量", speed: "速度", etaLabel: "预计剩余",
     etaSecs: (n: number) => `~${n} 秒`, currentFile: (f: string) => `当前: ${f}`,
     stageProgress: "阶段进度",
-
     // ── Rewrite report dialog (D10) ───────────────────────
     rewriteReportTitle: "路径重写报告",
     rewrittenCount: (n: number) => `已重写 (${n} 处)`,
     skippedCount: (n: number) => `已跳过 (${n} 处，低置信度)`,
     reasonLabel: (r: string) => `原因: ${r}`,
-
     // ── Discovered children dialog (D11) ──────────────────
-    discoveredTitle: "新发现的子项目", enableSelected: "开启选中项",
     selectedEnabled: "已开启选中的子项目",
     discoveredIntro: (r: string) => `工作区 ${r} 中发现了以下新的子目录：`,
     discoveredAtRemote: (at: string, dir: string) => `创建于 ${at} · 对端可能的路径: ${dir}`,
     discoveredHint: (peer: string) =>
         `选中的子项目将使用工作区默认设置开启同步。\n同步模式: 双向自动 · 目标设备: ${peer}`,
-
     // ── Wizard dialog (D12) ───────────────────────────────
     wizardTitle: (step: number) => `欢迎使用 CodeBaton — Step ${step}/3`,
     prevStep: "上一步", nextStep: "下一步", done: "完成",
@@ -163,13 +132,11 @@ const dictZh = {
     nextStepTitle: "下一步",
     wizardNext: "在另一台设备上安装并运行 CodeBaton，两台设备将自动发现彼此。然后在侧边栏中点击发现的设备进行配对。",
     devicesOnLan: "当前局域网中的设备", scanning: "正在扫描...",
-
     // ── Chat tab ──────────────────────────────────────────
     chatEmpty: (n: string) => `还没有消息。在下方输入框给 ${n} 发条消息吧。`,
     copy: "复制", copied: "已复制", me: "我",
     chatPlaceholder: "输入消息，Enter 发送（Shift+Enter 换行）", peerOffline: "对端离线",
     send: "发送", sendFailed: (m: string) => `发送失败：${m}`,
-
     // ── File transfer tab ─────────────────────────────────
     defaultReceiveDir: "默认接收目录", notSetPickEachTime: "（未设置，接收时每次选择）",
     pendingFiles: (n: number) => `待接收文件（${n}）`,
@@ -224,10 +191,8 @@ const dictZh = {
     clipboardNoFile: "剪贴板没有文件", pasteSendFailed: (m: string) => `粘贴发送失败：${m}`,
     fileReceiveConfirm: (s: string, f: string, p: string) => `${s} 想发送文件：${f}\n\n保存到：${p}`,
     fileReceiveConfirmed: "已确认文件接收",
-
     // ── App-level toasts ──────────────────────────────────
-    projMapAckd: "项目映射已确认", wsMapAckd: "工作区映射已确认", fileSentToast: "文件已发送",
-
+    projMapAckd: "项目映射已确认", fileSentToast: "文件已发送",
     // ── Settings page ─────────────────────────────────────
     loading: "加载中...", appearance: "外观",
     themeFollowsSystem: "亮/暗主题，默认跟随系统",
@@ -245,67 +210,47 @@ const dictZh = {
     logs: "日志", logLevel: "日志级别", logDir: "日志目录", open: "打开",
     rerunWizard: "重新运行首次向导",
 };
-
 // The key set, values widened so zh and en share one type (some are functions).
 export type Strings = { [K in keyof typeof dictZh]: (typeof dictZh)[K] };
-
 const dictEn: Strings = {
     online: "Online", offline: "Offline", syncing: "Syncing", idle: "Idle",
     paired: "Paired Devices", discovered: "Discovered", settings: "Settings",
-    pair: "Pair", view: "View", push: "Push", pull: "Pull", pullDisabledHint: "Pull is under development", cancel: "Cancel",
-    enable: "Enable", manage: "Manage", edit: "Edit", save: "Save", close: "Close",
+    pair: "Pair", view: "View", push: "Push", cancel: "Cancel",
+    manage: "Manage", edit: "Edit", save: "Save", close: "Close",
     browse: "Browse", confirm: "Confirm", ignoreAll: "Ignore All", later: "Later",
     selfMachine: "This Device", aiSessions: "AI Tool Sessions", syncProjects: "Synced Projects",
-    projSessions: "project sessions", addProject: "Add Project", addWorkspace: "Add Workspace",
-    synced: "Synced", last: "Last", minAgo: "min ago", mode: "Mode", biAuto: "Two-way auto",
-    workspace: "Workspace", notEnabled: "Off", newSubFound: "new sub-project(s) found", files: "files",
+    projSessions: "project sessions", addProject: "Add Project", synced: "Synced", last: "Last", minAgo: "min ago", mode: "Mode", biAuto: "Two-way auto",
+    files: "files",
     localPath: "Local path", remotePath: "Remote path", sessionDir: "Session dir", syncMode: "Sync mode",
-    targetTool: "Target tool", excludeRules: "Exclude rules", recentSync: "Recent syncs",
+    excludeRules: "Exclude rules", recentSync: "Recent syncs",
     success: "OK", failed: "Failed", connLost: "Connection lost", modify: "Edit",
-    pushToHome: "Push to", pullFromHome: "Pull from", deleteMapping: "Delete mapping", deleteFailed: "Failed to delete mapping",
+    pushToHome: "Push to", deleteMapping: "Delete mapping", deleteFailed: "Failed to delete mapping",
     pairedTime: "Paired", claudeMap: "Claude Config Mapping", projMap: "Project Mappings",
     localM: "Local", remoteM: "Remote", addProjMap: "Add Project Mapping", syncHistory: "Sync History",
-    pushAll: "Push All", pullAll: "Pull All", unpair: "Unpair",
+    pushAll: "Push All", unpair: "Unpair",
     lastSyncLabel: "Last sync", conflictDetected: "conflict detected", handle: "Resolve",
-    pausedAuto: "Auto-sync paused",
     settingsTitle: "Settings", deviceName: "Device name", deviceId: "Device ID",
-
     theme: "Theme", themeDark: "Dark", themeLight: "Light", themeSystem: "System",
     browserPreview: "Browser preview mode — backend IPC unavailable. Run npm run tauri dev.",
-
     tabMappings: "Mappings", tabHistory: "Sync History", tabChat: "Chat", tabFiles: "File Transfer",
     peerNotFound: "Device not found", statusLabel: "Status:", pairedAt: (t: string) => `· Paired ${t}`,
-    workspaceMap: "Workspace Mappings", workspaceColon: "Workspace:", conflictPill: "⚠ Conflict",
-    newlyDiscoveredTag: "New", noProjMap: "No project mappings", noSyncHistory: "No sync history",
+    noProjMap: "No project mappings", noSyncHistory: "No sync history",
     deviceOffline: "Device offline",
     histPush: "→ Push", histPull: "← Pull", trigAuto: "Auto", trigManual: "Manual",
     pillSynced: "● Synced", pillSyncing: (p: number) => `◐ Syncing ${p}%`, pillIdle: "○",
-    syncingPct: (p: number) => `Syncing ${p}%`,
     histFiles: (n: number, b: string) => `${n} files ${b}`,
-
     addProjTitle: "Add Project Mapping", projName: "Project name",
     projNamePlaceholder: "Optional — defaults to directory name", localDir: "Local directory",
     localDirPlaceholder: "Click “Browse” to pick a local project directory", targetDevice: "Target device",
     noPairedPeerPick: "(No paired device — pair first)", noPairedPeer: "(No paired device)",
-    twoWayAutoSync: "Two-way auto sync", oneWayPushLocal: "One-way push (Local → Remote)",
-    oneWayPushRemote: "One-way push (Remote → Local)", targetAiTool: "Target AI tool",
-    sameToolOpt: "Claude Code (same tool)", toCodex: "Convert to Codex", toGemini: "Convert to Gemini CLI",
     projReqSent: "Project mapping request sent, waiting for peer to pick a directory",
     localDirMissing: (d: string) => `Local directory does not exist:\n${d}\n\nCreate it and continue?`,
     mkdirAndSent: "Directory created and project mapping request sent",
     addFailed: (m: string) => `Add failed: ${m}`,
-
-    addWsTitle: "Add Workspace Mapping", wsName: "Workspace name", localRoot: "Local root",
-    scannedChildren: "Scanned sub-projects", scanHint: "Pick a local root then click “Browse” to scan",
-    defaultSyncMode: "Default sync mode", twoWayAuto: "Two-way auto", oneWayPush: "One-way push",
-    newChildren: "New sub-projects", autoEnableSync: "Auto-enable sync", manualEnable: "Enable after manual confirm",
     addedWorkspace: (n: number) => `Workspace added (${n} sub-project(s))`,
     addWsFailed: (m: string) => `Add workspace failed: ${m}`,
-
-    enableChildTitle: "Enable Sub-project Sync", subProject: "Sub-project",
     remoteDirAutofill: "Auto-filled from workspace mapping, editable",
     childEnabled: (c: string) => `${c} sync enabled`,
-
     pairReqSent: "Pairing Request Sent", cancelPair: "Cancel Pairing", confirmPair: "Confirm Pairing",
     pairFailed: (m: string) => `Pairing failed: ${m}`, pairFailedLabel: "Pairing failed: ",
     waitingPeerConfirm: "Waiting for the other device to confirm...", fetchingPairCode: "Fetching pairing code...",
@@ -314,15 +259,12 @@ const dictEn: Strings = {
     samePairCodeHint: "Both devices must show the same pairing code",
     pairedWith: (n: string) => `Paired with ${n}`,
     confirmPairFailed: (m: string) => `Confirm pairing failed: ${m}`,
-
     projMapReqTitle: "Project Mapping Request", confirmMap: "Confirm Mapping",
     initiatorDevice: "Initiator device", remoteDir: "Remote directory", localPlaceDir: "Local target directory",
     pickProjDirPlaceholder: "Pick a local directory to sync this project",
     projMapConfirmed: "Project mapping confirmed", confirmFailed: (m: string) => `Confirm failed: ${m}`,
-    wsMapReqTitle: "Workspace Mapping Request", remoteRoot: "Remote root",
     pickWsRootPlaceholder: "Pick a local root to sync this workspace",
     wsMapConfirmed: "Workspace mapping confirmed",
-
     conflictTitle: "Conflict Detected", confirmOverwrite: "Confirm Overwrite", execute: "Apply",
     conflictDesc: (n: string) => `Both sides of project “${n}” have unsynced changes; auto-sync is not possible.`,
     changedAfterSync: (n: number) => `Changed since last sync: ${n} file(s)`,
@@ -332,7 +274,6 @@ const dictEn: Strings = {
     preferRemote: "Prefer remote (local changes overwritten)",
     preferNone: "Skip for now (keep both sides as-is)",
     overwriteWarn: "⚠ Overwritten changes cannot be recovered. Back up manually first.",
-
     batchTitle: (verb: string) => `Batch ${verb} Confirmation`, start: "Start",
     batchIntro: (target: string, verb: string) => `About to ${verb} the following projects ${target}:`,
     fromPeer: (n: string) => `from ${n}`, toPeer: (n: string) => `to ${n}`,
@@ -341,17 +282,14 @@ const dictEn: Strings = {
     total: "Total", totalSummary: (n: number, b: string) => `${n} file(s)  about ${b}`,
     sensitiveMatched: "The following files match sensitive-file patterns:",
     includeThisFile: (f: string) => `Include this file — ${f}`,
-
     excludeRulesTitle: (n: string) => `Exclude Rules — ${n}`,
     globalRulesRO: "Global rules (inherited from Settings, read-only)", projSpecificRules: "Project-specific rules",
     globPerLine: "One glob pattern per line", excludeSaved: "Exclude rules saved",
-
     unpairTitle: "Unpair", thisDevice: "this device",
     unpairConfirm: (n: string) => `Unpair from ${n}?`,
     unpairAfter: "After unpairing:", unpairBullet1: "All project mappings for this device are removed",
     unpairBullet2: "Files already synced to the peer are not deleted",
     unpairBullet3: "Re-pairing requires confirming the pairing code again",
-
     syncDone: "Sync Complete", syncFailed: "Sync Failed", syncInProgress: "Sync in Progress",
     minimizeToBackground: "Minimize to Background", cancelSync: "Cancel Sync",
     transferredFiles: "Files transferred", count: "", transferredData: "Data transferred",
@@ -363,19 +301,15 @@ const dictEn: Strings = {
     dataAmount: "Data", speed: "Speed", etaLabel: "ETA",
     etaSecs: (n: number) => `~${n}s`, currentFile: (f: string) => `Current: ${f}`,
     stageProgress: "Stage Progress",
-
     rewriteReportTitle: "Path Rewrite Report",
     rewrittenCount: (n: number) => `Rewritten (${n})`,
     skippedCount: (n: number) => `Skipped (${n}, low confidence)`,
     reasonLabel: (r: string) => `Reason: ${r}`,
-
-    discoveredTitle: "Newly Discovered Sub-projects", enableSelected: "Enable Selected",
     selectedEnabled: "Selected sub-projects enabled",
     discoveredIntro: (r: string) => `Found these new sub-directories in workspace ${r}:`,
     discoveredAtRemote: (at: string, dir: string) => `Created ${at} · likely remote path: ${dir}`,
     discoveredHint: (peer: string) =>
         `Selected sub-projects will sync using the workspace defaults.\nSync mode: Two-way auto · Target device: ${peer}`,
-
     wizardTitle: (step: number) => `Welcome to CodeBaton — Step ${step}/3`,
     prevStep: "Back", nextStep: "Next", done: "Done",
     nameThisDevice: "Give this device a name so it's easy to recognize on other devices:",
@@ -390,12 +324,10 @@ const dictEn: Strings = {
     nextStepTitle: "Next Step",
     wizardNext: "Install and run CodeBaton on another device; the two will discover each other automatically. Then click the discovered device in the sidebar to pair.",
     devicesOnLan: "Devices on the LAN", scanning: "Scanning...",
-
     chatEmpty: (n: string) => `No messages yet. Send ${n} a message below.`,
     copy: "Copy", copied: "Copied", me: "Me",
     chatPlaceholder: "Type a message, Enter to send (Shift+Enter for newline)", peerOffline: "Peer offline",
     send: "Send", sendFailed: (m: string) => `Send failed: ${m}`,
-
     defaultReceiveDir: "Default receive directory", notSetPickEachTime: "(Not set — choose each time)",
     pendingFiles: (n: number) => `Pending files (${n})`,
     pendingHint: "No default receive directory set. Pick a save location for each file (auto-receives once a default is set).",
@@ -449,9 +381,7 @@ const dictEn: Strings = {
     clipboardNoFile: "No file on clipboard", pasteSendFailed: (m: string) => `Paste-send failed: ${m}`,
     fileReceiveConfirm: (s: string, f: string, p: string) => `${s} wants to send a file: ${f}\n\nSave to: ${p}`,
     fileReceiveConfirmed: "File receive confirmed",
-
-    projMapAckd: "Project mapping confirmed", wsMapAckd: "Workspace mapping confirmed", fileSentToast: "File sent",
-
+    projMapAckd: "Project mapping confirmed", fileSentToast: "File sent",
     loading: "Loading...", appearance: "Appearance",
     themeFollowsSystem: "Light/Dark theme, follows system by default",
     copiedDeviceId: "Device ID copied",
@@ -468,5 +398,4 @@ const dictEn: Strings = {
     logs: "Logs", logLevel: "Log level", logDir: "Log directory", open: "Open",
     rerunWizard: "Re-run first-run wizard",
 };
-
 export const dict: Record<Lang, Strings> = { zh: dictZh, en: dictEn };

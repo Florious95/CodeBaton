@@ -162,8 +162,6 @@ export const ipc = {
   cancelSync: (projectId: string) => call<void>("cancel_sync", { projectId }),
 
   addProject: (project: unknown) => call<void>("add_project", { project }),
-  setProjectMode: (projectId: string, mode: string) =>
-    call<void>("set_project_mode", { projectId, mode }),
   saveExcludeRules: (projectId: string, rules: string[]) =>
     call<void>("save_exclude_rules", { projectId, rules }),
   deleteProject: (projectId: string) => call<void>("delete_project", { projectId }),

@@ -19,11 +19,6 @@ export function fmtTime(ts: string): string {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
 }
 
-export function modeLabel(mode: string): string {
-  // Manual handoff is push-only; other modes are legacy/dead.
-  return mode === "oneWayPush" ? "单向推送" : mode;
-}
-
 export function osLabel(os: string): string {
   switch (os) {
     case "darwin":
