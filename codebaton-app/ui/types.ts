@@ -67,28 +67,6 @@ export interface Project {
   history: SyncHistoryEntry[];
 }
 
-export interface WorkspaceChild {
-  name: string;
-  localDir: string;
-  remoteDir: string;
-  status: ProjectSyncStatus;
-  progress: number | null;
-  peerName: string | null;
-  newlyDiscovered: boolean;
-  discoveredAt: string | null;
-}
-
-export interface Workspace {
-  id: string;
-  name: string;
-  localRoot: string;
-  remoteRoot: string;
-  peerName: string;
-  defaultMode: SyncMode;
-  children: WorkspaceChild[];
-  history: SyncHistoryEntry[];
-}
-
 export interface LocalInfo {
   deviceId: string;
   deviceName: string;
@@ -118,7 +96,6 @@ export interface Overview {
   local: LocalInfo;
   tools: AiTool[];
   projects: Project[];
-  workspaces: Workspace[];
 }
 
 export interface SyncStage {
@@ -234,16 +211,6 @@ export interface ProjectMappingRequest {
   mode: SyncMode;
 }
 
-export interface WorkspaceMappingRequest {
-  requestId: string;
-  workspaceName: string;
-  peerName: string;
-  sourceRoot: string;
-  suggestedRemoteRoot: string;
-  mode: SyncMode;
-  children: string[];
-}
-
 export interface TextMessage {
   senderName: string;
   content: string;
@@ -290,13 +257,6 @@ export interface FileTransferRecord {
   status: string;
   timestamp: number;
   savePath?: string | null;
-}
-
-export interface ScannedChild {
-  localName: string;
-  remoteName: string;
-  matchedRemote: boolean;
-  selected: boolean;
 }
 
 export type GlobalStatus = "idle" | "syncing" | "conflict";

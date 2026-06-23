@@ -46,15 +46,6 @@ export function App() {
           setDialog({ kind: "projectMappingRequest", request });
           return;
         }
-        const workspaceRequest = await ipc.pendingWorkspaceMappingRequest();
-        if (cancelled) return;
-        if (workspaceRequest) {
-          ipc.uiLog(
-            `pending_workspace_mapping_request received requestId=${workspaceRequest.requestId} workspace=${workspaceRequest.workspaceName}`,
-          );
-          setDialog({ kind: "workspaceMappingRequest", request: workspaceRequest });
-          return;
-        }
         const fileRequest = await ipc.pendingFileTransferRequest();
         if (cancelled || !fileRequest) return;
         ipc.uiLog(
@@ -97,15 +88,6 @@ export function App() {
           pushToast(t.projMapAckd);
         })
         .catch((e) => ipc.uiLog(`project_mapping_ack_poll_failed error=${String(e)}`));
-      ipc
-        .pollWorkspaceMappingAcks()
-        .then(async (count) => {
-          if (cancelled || count <= 0) return;
-          ipc.uiLog(`workspace_mapping_acks_applied count=${count}`);
-          await refresh();
-          pushToast(t.wsMapAckd);
-        })
-        .catch((e) => ipc.uiLog(`workspace_mapping_ack_poll_failed error=${String(e)}`));
       ipc
         .pollFileTransferAcks()
         .then((count) => {

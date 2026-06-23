@@ -14,18 +14,14 @@ import type {
   StatusBar,
   SyncProgress,
   SyncResult,
-  WorkspaceMappingRequest,
 } from "./types";
 
 // Active dialog descriptor (D1-D12). `null` = no dialog.
 export type DialogState =
   | null
   | { kind: "addProject" }
-  | { kind: "addWorkspace" }
-  | { kind: "enableChild"; workspaceId: string; child: string }
   | { kind: "pairing"; peerId: string }
   | { kind: "projectMappingRequest"; request: ProjectMappingRequest }
-  | { kind: "workspaceMappingRequest"; request: WorkspaceMappingRequest }
   | { kind: "conflict"; projectId: string }
   | { kind: "batch"; peerId: string }
   | { kind: "excludeRules"; projectId: string }
@@ -33,7 +29,6 @@ export type DialogState =
   | { kind: "syncProgress" }
   | { kind: "handoffPreview"; projectId: string; peerName: string }
   | { kind: "rewriteReport"; projectId: string }
-  | { kind: "discovered"; workspaceId: string }
   | { kind: "wizard" };
 
 export type View =

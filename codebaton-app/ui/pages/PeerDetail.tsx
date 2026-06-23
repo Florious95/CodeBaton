@@ -1,9 +1,8 @@
 import { useEffect, useState } from "react";
-import { ChevronDown, ChevronRight } from "lucide-react";
 import { ipc } from "../ipc";
 import { useStore } from "../store";
-import type { Peer, Project, SyncHistoryEntry, Workspace } from "../types";
-import { fmtBytes, fmtTime, modeLabel, osLabel } from "../util";
+import type { Peer, Project, SyncHistoryEntry } from "../types";
+import { fmtBytes, fmtTime, osLabel } from "../util";
 import { ProjectCard } from "../ProjectCard";
 import { ChatTab } from "../ChatTab";
 import { FileTransferTab } from "../FileTransferTab";
@@ -13,20 +12,18 @@ export function PeerDetailPage({ peerId }: { peerId: string }) {
   const [peer, setPeer] = useState<Peer | null>(null);
   const [projects, setProjects] = useState<Project[]>([]);
   const [history, setHistory] = useState<SyncHistoryEntry[]>([]);
-  const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [managed, setManaged] = useState<string | null>(null);
-  const [wsOpen, setWsOpen] = useState<Record<string, boolean>>({});
   const [tab, setTab] = useState<"mappings" | "history" | "chat" | "files">("mappings");
 
   useEffect(() => {
     const load = () =>
       ipc
         .getPeerDetail(peerId)
-        .then(([p, pr, h, ws]) => {
+        // Workspace UI is hidden; ignore the 4th tuple item (backend unchanged).
+        .then(([p, pr, h]) => {
           setPeer(p);
           setProjects(pr);
           setHistory(h);
-          setWorkspaces(ws ?? []);
         })
         .catch(() => {});
     load();
@@ -133,7 +130,6 @@ export function PeerDetailPage({ peerId }: { peerId: string }) {
                     <span className={`status-pill ${p.status}`}>
                       {p.status === "synced" ? t.pillSynced : p.status === "syncing" ? t.pillSyncing(p.progress ?? 0) : t.pillIdle}
                     </span>
-                    <span className="faint">{modeLabel(p.mode)}</span>
                   </div>
                 </div>
                 <button
@@ -151,64 +147,6 @@ export function PeerDetailPage({ peerId }: { peerId: string }) {
       <div className="btn-group" style={{ justifyContent: "flex-end" }}>
         <button onClick={() => setDialog({ kind: "addProject" })}>{"+ "}{t.addProjMap}</button>
       </div>
-
-      {workspaces.length > 0 && (
-        <>
-          <div className="section-title">{t.workspaceMap}</div>
-          {workspaces.map((ws) => {
-            const open = wsOpen[ws.id] ?? true;
-            return (
-              <div className="card flush" key={ws.id}>
-                <div
-                  className="ws-head"
-                  onClick={() => setWsOpen({ ...wsOpen, [ws.id]: !open })}
-                >
-                  <span className="chev">
-                    {open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-                  </span>
-                  <strong>{t.workspaceColon}</strong>
-                  <span className="path">
-                    {ws.localRoot}&nbsp;&nbsp;⇄&nbsp;&nbsp;{ws.remoteRoot}
-                  </span>
-                </div>
-                {open && (
-                  <div className="ws-body">
-                    {ws.children.map((c) => (
-                      <div className="ws-child" key={c.name}>
-                        <span className={`name ${c.status === "disabled" ? "muted" : ""}`}>
-                          {c.name}
-                        </span>
-                        {c.status === "synced" ? (
-                          <span className="status-pill synced" style={{ width: 88 }}>
-                            <span className="dot online" />
-                            {t.synced}
-                          </span>
-                        ) : c.status === "syncing" ? (
-                          <span className="status-pill syncing" style={{ width: 120 }}>
-                            <span className="spinner" />
-                            {t.syncingPct(c.progress ?? 0)}
-                          </span>
-                        ) : c.status === "conflict" ? (
-                          <span className="status-pill conflict" style={{ width: 88 }}>
-                            {t.conflictPill}
-                          </span>
-                        ) : (
-                          <span className="status-pill disabled" style={{ width: 88 }}>
-                            <span className="dot offline" />
-                            {t.notEnabled}
-                          </span>
-                        )}
-                        <span className="faint" style={{ flex: 1 }} />
-                        {c.newlyDiscovered && <span className="faint">{t.newlyDiscoveredTag}</span>}
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            );
-          })}
-        </>
-      )}
       </>
       )}
 

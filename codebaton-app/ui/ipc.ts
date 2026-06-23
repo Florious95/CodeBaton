@@ -19,13 +19,10 @@ import type {
   Project,
   ProjectMappingRequest,
   RewriteReport,
-  ScannedChild,
   Settings,
   StatusBar,
   SyncHistoryEntry,
   TextMessage,
-  Workspace,
-  WorkspaceMappingRequest,
 } from "./types";
 
 function inTauri(): boolean {
@@ -71,8 +68,10 @@ export const ipc = {
   openPath: (path: string) => call<void>("open_path", { path }),
   getOverview: () => call<Overview>("get_overview"),
   getPeers: () => call<Peer[]>("get_peers"),
+  // Backend still returns a 4th Workspace[] element (dead code); the workspace
+  // UI is hidden, so we type and consume only the first three.
   getPeerDetail: (peerId: string) =>
-    call<[Peer, Project[], SyncHistoryEntry[], Workspace[]]>("get_peer_detail", { peerId }),
+    call<[Peer, Project[], SyncHistoryEntry[]]>("get_peer_detail", { peerId }),
   getSettings: () => call<Settings>("get_settings"),
   saveSettings: (settings: Settings) => call<void>("save_settings", { settings }),
   getStatusBar: () => call<StatusBar>("get_status_bar"),
@@ -88,11 +87,6 @@ export const ipc = {
   confirmProjectMappingRequest: (requestId: string, localDir: string) =>
     call<void>("confirm_project_mapping_request", { requestId, localDir }),
   pollProjectMappingAcks: () => call<number>("poll_project_mapping_acks"),
-  pendingWorkspaceMappingRequest: () =>
-    call<WorkspaceMappingRequest | null>("pending_workspace_mapping_request"),
-  confirmWorkspaceMappingRequest: (requestId: string, localRoot: string) =>
-    call<void>("confirm_workspace_mapping_request", { requestId, localRoot }),
-  pollWorkspaceMappingAcks: () => call<number>("poll_workspace_mapping_acks"),
   pendingTextMessage: () => call<TextMessage | null>("pending_text_message"),
   sendTextMessage: (peerName: string, content: string) =>
     call<void>("send_text_message", { peerName, content }),
@@ -138,9 +132,6 @@ export const ipc = {
   cancelPairing: (peerId: string) => call<void>("cancel_pairing", { peerId }),
   unpair: (peerId: string) => call<void>("unpair", { peerId }),
 
-  scanWorkspace: (localRoot: string, remoteRoot: string) =>
-    call<ScannedChild[]>("scan_workspace", { localRoot, remoteRoot }),
-
   // Handoff is push-only; the backend command still takes a direction arg
   // (kept as dead code), so we always send "push".
   getBatchPlan: (peerId: string) =>
@@ -171,9 +162,6 @@ export const ipc = {
   cancelSync: (projectId: string) => call<void>("cancel_sync", { projectId }),
 
   addProject: (project: unknown) => call<void>("add_project", { project }),
-  addWorkspace: (workspace: unknown) => call<void>("add_workspace", { workspace }),
-  enableChild: (workspaceId: string, child: string, config: unknown) =>
-    call<void>("enable_child", { workspaceId, child, config }),
   setProjectMode: (projectId: string, mode: string) =>
     call<void>("set_project_mode", { projectId, mode }),
   saveExcludeRules: (projectId: string, rules: string[]) =>

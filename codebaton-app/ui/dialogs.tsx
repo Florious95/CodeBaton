@@ -17,8 +17,6 @@ import type {
   Pairing,
   ProjectMappingRequest,
   RewriteReport,
-  ScannedChild,
-  WorkspaceMappingRequest,
 } from "./types";
 import { fmtBytes, osLabel } from "./util";
 
@@ -150,233 +148,6 @@ function AddProjectDialog() {
           <option value="same">{t.sameToolOpt}</option>
           <option value="codex">{t.toCodex}</option>
           <option value="gemini">{t.toGemini}</option>
-        </select>
-      </div>
-    </Dialog>
-  );
-}
-
-// ── D2: Add workspace mapping ────────────────────────────────────────
-// Suggested remote-root default for a peer based on its OS (item 5).
-function defaultRemoteRoot(os: string): string {
-  return os === "windows" ? "D:\\projects" : "~/projects";
-}
-
-function AddWorkspaceDialog() {
-  const { setDialog, refresh, t } = useStore();
-  const [name, setName] = useState("");
-  const [localRoot, setLocalRoot] = useState("");
-  // Real paired peers (excludes the local machine); empty on first run. Track
-  // os so the remote-root default matches the peer platform.
-  const [pairedPeers, setPairedPeers] = useState<{ id: string; name: string; os: string }[]>([]);
-  const [peer, setPeer] = useState("");
-  const [remoteRoot, setRemoteRoot] = useState("");
-  const [children, setChildren] = useState<ScannedChild[]>([]);
-  const [mode, setMode] = useState("twoWayAuto");
-  const [autoEnable, setAutoEnable] = useState(false);
-
-  useEffect(() => {
-    ipc
-      .getPeers()
-      .then((ps) => {
-        const real = ps
-          .filter((p) => p.kind !== "local")
-          .map((p) => ({ id: p.id, name: p.name, os: p.os }));
-        setPairedPeers(real);
-        if (real[0]) {
-          setPeer(real[0].name);
-          // Seed the remote root from the first peer's OS unless user typed one.
-          setRemoteRoot((cur) => cur || defaultRemoteRoot(real[0].os));
-        }
-      })
-      .catch(() => {});
-  }, []);
-
-  const scan = async () => {
-    // Open the native picker, then scan the chosen LOCAL directory for its
-    // first-level subdirectories. Does not require a peer — scanning is purely
-    // a local filesystem listing (remoteRoot only annotates matched hints).
-    const dir = await ipc.pickDirectory().catch(() => null);
-    const root = dir ?? localRoot;
-    if (dir) {
-      setLocalRoot(dir);
-      // 对端根目录默认 = 本机根目录（参考值，可改）。
-      if (!remoteRoot.trim()) setRemoteRoot(dir);
-    }
-    if (!root.trim()) return;
-    ipc.uiLog(`workspace_browse_scan root=${root}`);
-    const r = await ipc.scanWorkspace(root, remoteRoot.trim() || root).catch(() => []);
-    ipc.uiLog(`workspace_scan_returned count=${r.length}`);
-    // Default every scanned child to selected so the list is immediately
-    // actionable (otherwise all-unchecked disables the 添加 button).
-    setChildren(r.map((c) => ({ ...c, selected: true })));
-  };
-
-  return (
-    <Dialog
-      title={t.addWsTitle}
-      width={560}
-      onClose={() => setDialog(null)}
-      footer={
-        <>
-          <button onClick={() => setDialog(null)}>{t.cancel}</button>
-          <button
-            className="primary"
-            disabled={!localRoot.trim() || !peer.trim() || children.filter((c) => c.selected).length === 0}
-            onClick={async () => {
-              const sel = children.filter((c) => c.selected).length;
-              ipc.uiLog(`add_workspace_submit localRoot=${localRoot} peer=${peer} selected=${sel}`);
-              try {
-                await ipc.addWorkspace({ name, localRoot, peer, remoteRoot, mode, autoEnable, children });
-                ipc.uiLog("add_workspace_saved");
-                await refresh();
-                pushToast(t.addedWorkspace(sel));
-                setDialog(null);
-              } catch (e) {
-                const msg = String(e);
-                ipc.uiLog(`add_workspace_failed error=${msg}`);
-                pushToast(t.addWsFailed(msg));
-              }
-            }}
-          >
-            {t.addProject}
-          </button>
-        </>
-      }
-    >
-      <div className="field">
-        <label>{t.wsName}</label>
-        <input value={name} onChange={(e) => setName(e.target.value)} />
-      </div>
-      <div className="field">
-        <label>{t.localRoot}</label>
-        <div className="row">
-          <input value={localRoot} onChange={(e) => setLocalRoot(e.target.value)} placeholder="~/projects" />
-          <button onClick={scan}>{t.browse}</button>
-        </div>
-      </div>
-      <div className="field">
-        <label>{t.targetDevice}</label>
-        <select
-          value={peer}
-          onChange={(e) => {
-            const name = e.target.value;
-            setPeer(name);
-            // Reset the remote-root suggestion to match the newly selected
-            // peer's OS (macOS → ~/projects, Windows → D:\projects).
-            const os = pairedPeers.find((p) => p.name === name)?.os ?? "";
-            setRemoteRoot(defaultRemoteRoot(os));
-          }}
-        >
-          {pairedPeers.length === 0 && <option value="">{t.noPairedPeer}</option>}
-          {pairedPeers.map((p) => (
-            <option key={p.id} value={p.name}>
-              {p.name}
-            </option>
-          ))}
-        </select>
-      </div>
-      {/* ISS-004: 「对端根目录」输入框已移除——有对端确认流程后，对端目录由对端
-          自己在确认弹窗里选；主方不需要填。 */}
-      <div className="section-title">{t.scannedChildren}{children.length > 0 ? `（${children.length}）` : ""}</div>
-      {children.length === 0 ? (
-        <p className="faint" style={{ fontSize: 12 }}>
-          {t.scanHint}
-        </p>
-      ) : (
-        children.map((c, i) => (
-          <label className="check" key={c.localName}>
-            <input
-              type="checkbox"
-              checked={c.selected}
-              onChange={() => {
-                const next = [...children];
-                next[i] = { ...c, selected: !c.selected };
-                setChildren(next);
-              }}
-            />
-            <span className="path">
-              {c.localName}/ ↔ {c.remoteName}/
-            </span>
-          </label>
-        ))
-      )}
-      <div className="field" style={{ marginTop: 14 }}>
-        <label>{t.defaultSyncMode}</label>
-        <select value={mode} onChange={(e) => setMode(e.target.value)}>
-          <option value="twoWayAuto">{t.twoWayAuto}</option>
-          <option value="oneWayPush">{t.oneWayPush}</option>
-        </select>
-      </div>
-      <div className="field">
-        <label>{t.newChildren}</label>
-        <label className="radio">
-          <input type="radio" checked={autoEnable} onChange={() => setAutoEnable(true)} />
-          {t.autoEnableSync}
-        </label>
-        <label className="radio">
-          <input type="radio" checked={!autoEnable} onChange={() => setAutoEnable(false)} />
-          {t.manualEnable}
-        </label>
-      </div>
-    </Dialog>
-  );
-}
-
-// ── D3: Enable a workspace child ─────────────────────────────────────
-function EnableChildDialog({ workspaceId, child }: { workspaceId: string; child: string }) {
-  const { setDialog, overview, t } = useStore();
-  const ws = overview?.workspaces.find((w) => w.id === workspaceId);
-  const c = ws?.children.find((x) => x.name === child);
-  const [peer, setPeer] = useState(ws?.peerName ?? "");
-  const [remote, setRemote] = useState(c?.remoteDir ?? "");
-  const [mode, setMode] = useState("twoWayAuto");
-
-  return (
-    <Dialog
-      title={t.enableChildTitle}
-      width={440}
-      onClose={() => setDialog(null)}
-      footer={
-        <>
-          <button onClick={() => setDialog(null)}>{t.cancel}</button>
-          <button
-            className="primary"
-            onClick={async () => {
-              await ipc.enableChild(workspaceId, child, { peer, remote, mode }).catch(() => {});
-              pushToast(t.childEnabled(child));
-              setDialog(null);
-            }}
-          >
-            {t.enable}
-          </button>
-        </>
-      }
-    >
-      <div className="detail-grid">
-        <span className="label">{t.subProject}</span>
-        <span>{child}</span>
-        <span />
-        <span className="label">{t.localPath}</span>
-        <span className="path">{c?.localDir}</span>
-        <span />
-      </div>
-      <div className="field">
-        <label>{t.targetDevice}</label>
-        <select value={peer} onChange={(e) => setPeer(e.target.value)}>
-          {peer ? <option value={peer}>{peer}</option> : <option value="">{t.noPairedPeer}</option>}
-        </select>
-      </div>
-      <div className="field">
-        <label>{t.remotePath}</label>
-        <input value={remote} onChange={(e) => setRemote(e.target.value)} />
-        <div className="hint">{t.remoteDirAutofill}</div>
-      </div>
-      <div className="field">
-        <label>{t.syncMode}</label>
-        <select value={mode} onChange={(e) => setMode(e.target.value)}>
-          <option value="twoWayAuto">{t.twoWayAuto}</option>
-          <option value="oneWayPush">{t.oneWayPush}</option>
         </select>
       </div>
     </Dialog>
@@ -565,98 +336,6 @@ function ProjectMappingRequestDialog({ request }: { request: ProjectMappingReque
   );
 }
 
-function WorkspaceMappingRequestDialog({ request }: { request: WorkspaceMappingRequest }) {
-  const { setDialog, refresh, t } = useStore();
-  const [localRoot, setLocalRoot] = useState(request.suggestedRemoteRoot ?? request.sourceRoot ?? "");
-  const [busy, setBusy] = useState(false);
-  const valid = localRoot.trim().length > 0;
-
-  return (
-    <Dialog
-      title={t.wsMapReqTitle}
-      icon={<FolderSearch size={18} />}
-      width={560}
-      onClose={() => setDialog(null)}
-      footer={
-        <>
-          <button disabled={busy} onClick={() => setDialog(null)}>
-            {t.later}
-          </button>
-          <button
-            className="primary"
-            disabled={!valid || busy}
-            onClick={async () => {
-              setBusy(true);
-              try {
-                ipc.uiLog(
-                  `confirm_workspace_mapping clicked requestId=${request.requestId} localRoot=${localRoot}`,
-                );
-                await ipc.confirmWorkspaceMappingRequest(request.requestId, localRoot);
-                await refresh();
-                pushToast(t.wsMapConfirmed);
-                setDialog(null);
-              } catch (e) {
-                const msg = String(e);
-                ipc.uiLog(
-                  `confirm_workspace_mapping failed requestId=${request.requestId} error=${msg}`,
-                );
-                pushToast(t.confirmFailed(msg));
-              } finally {
-                setBusy(false);
-              }
-            }}
-          >
-            {t.confirmMap}
-          </button>
-        </>
-      }
-    >
-      <div className="detail-grid">
-        <span className="label">{t.initiatorDevice}</span>
-        <span>{request.peerName}</span>
-        <span />
-        <span className="label">{t.workspace}</span>
-        <span>{request.workspaceName}</span>
-        <span />
-        <span className="label">{t.remoteRoot}</span>
-        <span className="path">{request.sourceRoot}</span>
-        <span />
-        <span className="label">{t.subProject}</span>
-        <span>{request.children.length}</span>
-        <span />
-      </div>
-      <div className="field">
-        <label>{t.localRoot}</label>
-        <div className="row">
-          <input
-            value={localRoot}
-            onChange={(e) => setLocalRoot(e.target.value)}
-            placeholder={t.pickWsRootPlaceholder}
-          />
-          <button
-            disabled={busy}
-            onClick={async () => {
-              ipc.uiLog("browse_clicked dialog=workspace_mapping_request");
-              const dir = await ipc.pickDirectory().catch(() => null);
-              if (dir) {
-                setLocalRoot(dir);
-                ipc.uiLog(`workspace_mapping_path_selected dir=${dir}`);
-              }
-            }}
-          >
-            {t.browse}
-          </button>
-        </div>
-      </div>
-      {request.children.length > 0 && (
-        <div className="field">
-          <label>{t.subProject}</label>
-          <p className="path">{request.children.join(", ")}</p>
-        </div>
-      )}
-    </Dialog>
-  );
-}
 
 // ── D5: Split-brain conflict ─────────────────────────────────────────
 function ConflictDialog({ projectId }: { projectId: string }) {
@@ -1158,57 +837,6 @@ function RewriteReportDialog({ projectId }: { projectId: string }) {
   );
 }
 
-// ── D11: Newly discovered child projects ─────────────────────────────
-function DiscoveredDialog({ workspaceId }: { workspaceId: string }) {
-  const { setDialog, overview, t } = useStore();
-  const ws = overview?.workspaces.find((w) => w.id === workspaceId);
-  const discovered = (ws?.children ?? []).filter((c) => c.newlyDiscovered);
-  const [sel, setSel] = useState<Record<string, boolean>>({});
-
-  return (
-    <Dialog
-      title={t.discoveredTitle}
-      icon={<FolderSearch size={18} />}
-      width={480}
-      onClose={() => setDialog(null)}
-      footer={
-        <>
-          <button onClick={() => setDialog(null)}>{t.ignoreAll}</button>
-          <button
-            className="primary"
-            onClick={async () => {
-              for (const c of discovered) {
-                if (sel[c.name]) await ipc.enableChild(workspaceId, c.name, {}).catch(() => {});
-              }
-              pushToast(t.selectedEnabled);
-              setDialog(null);
-            }}
-          >
-            {t.enableSelected}
-          </button>
-        </>
-      }
-    >
-      <p className="muted" style={{ marginBottom: 10 }}>
-        {t.discoveredIntro(ws?.localRoot ?? "")}
-      </p>
-      {discovered.map((c) => (
-        <label className="check" key={c.name}>
-          <input type="checkbox" checked={!!sel[c.name]} onChange={() => setSel({ ...sel, [c.name]: !sel[c.name] })} />
-          <div>
-            <div>{c.name}/</div>
-            <div className="path">
-              {t.discoveredAtRemote(c.discoveredAt ?? "", c.remoteDir ?? "")}
-            </div>
-          </div>
-        </label>
-      ))}
-      <div className="warn-box" style={{ color: "var(--text-dim)", background: "transparent", border: "1px solid var(--border)" }}>
-        <span style={{ whiteSpace: "pre-line" }}>{t.discoveredHint(ws?.peerName ?? "")}</span>
-      </div>
-    </Dialog>
-  );
-}
 
 // ── D12: First-run wizard (3 steps) ──────────────────────────────────
 function WizardDialog() {
@@ -1324,16 +952,10 @@ export function DialogHost() {
   switch (dialog.kind) {
     case "addProject":
       return <AddProjectDialog />;
-    case "addWorkspace":
-      return <AddWorkspaceDialog />;
-    case "enableChild":
-      return <EnableChildDialog workspaceId={dialog.workspaceId} child={dialog.child} />;
     case "pairing":
       return <PairingDialog peerId={dialog.peerId} />;
     case "projectMappingRequest":
       return <ProjectMappingRequestDialog request={dialog.request} />;
-    case "workspaceMappingRequest":
-      return <WorkspaceMappingRequestDialog request={dialog.request} />;
     case "conflict":
       return <ConflictDialog projectId={dialog.projectId} />;
     case "batch":
@@ -1348,8 +970,6 @@ export function DialogHost() {
       return <SyncProgressDialog />;
     case "rewriteReport":
       return <RewriteReportDialog projectId={dialog.projectId} />;
-    case "discovered":
-      return <DiscoveredDialog workspaceId={dialog.workspaceId} />;
     case "wizard":
       return <WizardDialog />;
   }
