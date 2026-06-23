@@ -242,16 +242,9 @@ export function PeerDetailPage({ peerId }: { peerId: string }) {
             <button
               disabled={!online}
               title={online ? "" : t.deviceOffline}
-              onClick={() => setDialog({ kind: "batch", peerId, direction: "push" })}
+              onClick={() => setDialog({ kind: "batch", peerId })}
             >
               {t.pushAll}
-            </button>
-            <button
-              disabled={!online}
-              title={online ? "" : t.deviceOffline}
-              onClick={() => setDialog({ kind: "batch", peerId, direction: "pull" })}
-            >
-              {t.pullAll}
             </button>
           </div>
           <button className="danger" onClick={() => setDialog({ kind: "unpair", peerId })}>

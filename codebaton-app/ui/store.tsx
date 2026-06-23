@@ -27,7 +27,7 @@ export type DialogState =
   | { kind: "projectMappingRequest"; request: ProjectMappingRequest }
   | { kind: "workspaceMappingRequest"; request: WorkspaceMappingRequest }
   | { kind: "conflict"; projectId: string }
-  | { kind: "batch"; peerId: string; direction: "push" | "pull" }
+  | { kind: "batch"; peerId: string }
   | { kind: "excludeRules"; projectId: string }
   | { kind: "unpair"; peerId: string }
   | { kind: "syncProgress" }
@@ -250,17 +250,12 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     };
   }, [refresh]);
 
-  // Tray push/pull-all actions land here.
+  // Tray push-all action lands here (handoff is push-only).
   useEffect(() => {
     let unsub: (() => void) | undefined;
-    listen<string>("tray-action", (action) => {
+    listen<string>("tray-action", () => {
       const peer = overview?.projects[0]?.peerId;
-      if (peer)
-        setDialog({
-          kind: "batch",
-          peerId: peer,
-          direction: action === "pull_all" ? "pull" : "push",
-        });
+      if (peer) setDialog({ kind: "batch", peerId: peer });
     }).then((u) => (unsub = u));
     return () => unsub?.();
   }, [overview]);

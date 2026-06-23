@@ -32,7 +32,6 @@ function AddProjectDialog() {
   const [name, setName] = useState("");
   const [localDir, setLocalDir] = useState("");
   const [peer, setPeer] = useState("");
-  const [mode, setMode] = useState("twoWayAuto");
   const [tool, setTool] = useState("same");
   const valid = localDir.trim() && peer.trim();
 
@@ -67,7 +66,17 @@ function AddProjectDialog() {
                 ipc.uiLog(
                   `add_project_submit peer=${peer} localDir=${localDir} createLocalDir=${createLocalDir}`,
                 );
-                await ipc.addProject({ name, localDir, peer, mode, tool, createLocalDir });
+                // Manual handoff is push-only; the mode selector was removed.
+                // Send oneWayPush explicitly — the backend defaults unknown
+                // labels to twoWayAuto, which would be wrong here.
+                await ipc.addProject({
+                  name,
+                  localDir,
+                  peer,
+                  mode: "oneWayPush",
+                  tool,
+                  createLocalDir,
+                });
               };
               try {
                 await submit(false);
@@ -134,19 +143,6 @@ function AddProjectDialog() {
             </option>
           ))}
         </select>
-      </div>
-      <div className="field">
-        <label>{t.syncMode}</label>
-        {[
-          ["twoWayAuto", t.twoWayAutoSync],
-          ["oneWayPush", t.oneWayPushLocal],
-          ["oneWayPull", t.oneWayPushRemote],
-        ].map(([v, l]) => (
-          <label className="radio" key={v}>
-            <input type="radio" checked={mode === v} onChange={() => setMode(v)} />
-            {l}
-          </label>
-        ))}
       </div>
       <div className="field">
         <label>{t.targetAiTool}</label>
@@ -739,21 +735,22 @@ function ConflictDialog({ projectId }: { projectId: string }) {
 }
 
 // ── D6: Batch sync confirmation (G6 sensitive-file opt-in) ───────────
-function BatchDialog({ peerId, direction }: { peerId: string; direction: "push" | "pull" }) {
+function BatchDialog({ peerId }: { peerId: string }) {
   const { setDialog, t } = useStore();
   const [plan, setPlan] = useState<BatchPlan | null>(null);
   const [selected, setSelected] = useState<Record<string, boolean>>({});
   const [sensitiveOptIn, setSensitiveOptIn] = useState<Record<string, boolean>>({});
   useEffect(() => {
-    ipc.getBatchPlan(peerId, direction).then((p) => {
+    ipc.getBatchPlan(peerId).then((p) => {
       setPlan(p);
       const sel: Record<string, boolean> = {};
       p.items.forEach((i) => (sel[i.projectId] = !i.upToDate));
       setSelected(sel);
     });
-  }, [peerId, direction]);
+  }, [peerId]);
 
-  const verb = direction === "pull" ? t.pull : t.push;
+  // Manual handoff is push-only.
+  const verb = t.push;
   const chosen = (plan?.items ?? []).filter((i) => selected[i.projectId] && !i.upToDate);
   const totalFiles = chosen.reduce((s, i) => s + i.changedFiles, 0);
   const totalBytes = chosen.reduce((s, i) => s + i.bytes, 0);
@@ -788,7 +785,7 @@ function BatchDialog({ peerId, direction }: { peerId: string; direction: "push" 
       }
     >
       <p className="muted" style={{ marginBottom: 10 }}>
-        {t.batchIntro(direction === "pull" ? t.fromPeer(plan?.peerName ?? "") : t.toPeer(plan?.peerName ?? ""), verb)}
+        {t.batchIntro(t.toPeer(plan?.peerName ?? ""), verb)}
       </p>
       {plan?.items.map((i) => (
         <label className="check" key={i.projectId}>
@@ -1340,7 +1337,7 @@ export function DialogHost() {
     case "conflict":
       return <ConflictDialog projectId={dialog.projectId} />;
     case "batch":
-      return <BatchDialog peerId={dialog.peerId} direction={dialog.direction} />;
+      return <BatchDialog peerId={dialog.peerId} />;
     case "excludeRules":
       return <ExcludeRulesDialog projectId={dialog.projectId} />;
     case "unpair":

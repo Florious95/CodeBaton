@@ -3,7 +3,7 @@ import { ChevronRight } from "lucide-react";
 import { ipc } from "./ipc";
 import { useStore, pushToast } from "./store";
 import type { Project } from "./types";
-import { fmtBytes, fmtTime, modeLabel } from "./util";
+import { fmtBytes, fmtTime } from "./util";
 
 export function ProjectCard({ project }: { project: Project }) {
   const { setDialog, setSelectedProjectId, refresh, t } = useStore();
@@ -58,19 +58,13 @@ export function ProjectCard({ project }: { project: Project }) {
               {t.last}: {fmtTime(project.lastSync)}
             </span>
           )}
-          <span className="faint">
-            {t.mode}: <span style={{ color: "var(--text-2)" }}>{modeLabel(project.mode)}</span>
-          </span>
           <span style={{ flex: 1 }} />
           {project.status === "syncing" ? (
             <button onClick={() => ipc.cancelSync(project.id)}>{t.cancel}</button>
           ) : (
-            <>
-              <button className="primary" onClick={() => sync()}>
-                {t.push}
-              </button>
-              <button disabled title={t.pullDisabledHint}>{t.pull}</button>
-            </>
+            <button className="primary" onClick={() => sync()}>
+              {t.push}
+            </button>
           )}
         </div>
       </div>
@@ -87,10 +81,6 @@ export function ProjectCard({ project }: { project: Project }) {
             <span className="label">{t.sessionDir}</span>
             <span className="path" style={{ gridColumn: "2/4" }}>
               {project.localSessionDir}
-            </span>
-            <span className="label">{t.syncMode}</span>
-            <span style={{ gridColumn: "2/4" }}>
-              <span className="chip">{modeLabel(project.mode)} ▾</span>
             </span>
             <span className="label">{t.targetTool}</span>
             <span style={{ gridColumn: "2/4" }}>
@@ -119,9 +109,6 @@ export function ProjectCard({ project }: { project: Project }) {
           <div className="btn-group" style={{ marginTop: 18 }}>
             <button className="cta" onClick={() => sync()}>
               {t.pushToHome} {project.peerName}
-            </button>
-            <button disabled title={t.pullDisabledHint}>
-              {t.pullFromHome} {project.peerName}
             </button>
             <span style={{ flex: 1 }} />
             <button

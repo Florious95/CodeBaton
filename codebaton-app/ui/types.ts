@@ -20,7 +20,10 @@ export interface AiTool {
   installed: boolean;
 }
 
-export type SyncMode = "twoWayAuto" | "oneWayPush" | "oneWayPull";
+// Manual handoff is push-only. (The backend SyncMode enum still has the other
+// variants as dead code; legacy configs may carry them, but the UI never
+// produces anything but oneWayPush.)
+export type SyncMode = "oneWayPush";
 export type ProjectSyncStatus =
   | "synced"
   | "syncing"

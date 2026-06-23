@@ -26,8 +26,9 @@ export function useNotifications() {
             : r.workspaceName
           : r.projectName;
         if (r.success) {
+          // "receive" = this device got an inbound handoff; otherwise it's our push.
           const route =
-            r.direction === "pull" || r.direction === "receive"
+            r.direction === "receive"
               ? `${r.peerName} → 本机`
               : `本机 → ${r.peerName}`;
           send("CodeBaton: 同步完成", `${scope} ${route}, ${r.files} 文件, ${fmtBytes(r.bytes)}`);

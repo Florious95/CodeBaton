@@ -141,8 +141,10 @@ export const ipc = {
   scanWorkspace: (localRoot: string, remoteRoot: string) =>
     call<ScannedChild[]>("scan_workspace", { localRoot, remoteRoot }),
 
-  getBatchPlan: (peerId: string, direction: string) =>
-    call<BatchPlan>("get_batch_plan", { peerId, direction }),
+  // Handoff is push-only; the backend command still takes a direction arg
+  // (kept as dead code), so we always send "push".
+  getBatchPlan: (peerId: string) =>
+    call<BatchPlan>("get_batch_plan", { peerId, direction: "push" }),
 
   getConflict: (projectId: string) => call<Conflict>("get_conflict", { projectId }),
   resolveConflict: (projectId: string, resolution: string) =>

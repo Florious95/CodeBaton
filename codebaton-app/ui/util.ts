@@ -20,16 +20,8 @@ export function fmtTime(ts: string): string {
 }
 
 export function modeLabel(mode: string): string {
-  switch (mode) {
-    case "twoWayAuto":
-      return "双向自动";
-    case "oneWayPush":
-      return "单向推送";
-    case "oneWayPull":
-      return "单向拉取";
-    default:
-      return mode;
-  }
+  // Manual handoff is push-only; other modes are legacy/dead.
+  return mode === "oneWayPush" ? "单向推送" : mode;
 }
 
 export function osLabel(os: string): string {
